@@ -17,10 +17,13 @@ gambling-adjacent, and nobody should stake real money on it.
 
 ## Current status
 
-- 236 tests passing (`python -m pytest`). Was 205; 31 added this session.
-- **The CLV measurement was broken by a benchmark change in 2024.** Read the
-  first RESOLVED subsection before trusting any CLV figure in this document,
-  including the gate verdict.
+- 244 tests passing (`python -m pytest`). Was 205; 39 added this session.
+- **The CLV measurement was broken, and is now fixed.** A benchmark change in
+  2024 plus favourite-longshot bias in multiplicative margin removal inflated
+  every historical CLV figure. `margin_method` now defaults to Shin, which
+  measures unbiased against the exchange. **Every CLV and market-log-loss
+  number above the RESOLVED section predates the fix and is wrong** — read that
+  section before trusting any of them, the gate verdict included.
 - Phase 3 backtest and hyperparameter tuner have both been run against real
   data on the Premier League.
 - **No demonstrated edge**, and the current era is measurably *negative*. See
@@ -148,16 +151,59 @@ method is unbiased; they bracket the truth, with additive about 2.3x closer.
    went away" but "the edge was never measured on a stable scale, and on the
    most trustworthy scale available it is negative."
 
-**Fixed so far:** `fair_line_preference` is now a `BacktestConfig` field;
-`predictions` carries a `fair_line_source` column; `evaluation.fair_line_sources`
-and `evaluation.benchmark_changed` report and flag a switch; and
+### The fix: Shin's method, and the corrected history
+
+Neither existing method is unbiased, and they *bracket* the truth — which is the
+signature of a one-parameter family sitting between them. **Shin's method** is
+exactly that: it models the margin as the bookmaker's defence against better-
+informed traders and solves for the insider share `z` per market, so it can land
+between multiplicative and additive instead of being stuck wherever a fixed rule
+puts it.
+
+Tested the same way, on 1770 selections where both books priced the same match:
+
+| band | multiplicative | additive | **Shin** |
+|---|---|---|---|
+| 0.00–0.15 | +0.0060 | −0.0012 | **+0.0007** |
+| 0.15–0.25 | +0.0023 | −0.0015 | **−0.0006** |
+| 0.25–0.35 | +0.0005 | −0.0009 | **−0.0005** |
+| 0.35–0.50 | −0.0011 | +0.0014 | **+0.0008** |
+| 0.50–1.00 | −0.0064 | +0.0030 | **+0.0006** |
+
+Flat across the whole range. And on the model's own bets, measured against the
+exchange: multiplicative **+1.75pp** (11 SE), additive **−0.77pp** (5.1 SE),
+Shin **−0.12pp (0.9 SE)** — indistinguishable from unbiased. Pinnacle-Shin and
+Betfair now agree to 0.13pp on 2024, where they disagreed by 1.75pp before.
+
+**`margin_method` now defaults to `"shin"`.** That was a deliberate change, not
+a quiet one, and `test_the_default_method_is_shin` pins it.
+
+**The corrected series** (`--from 2017-08-01 --market 1x2`, Shin):
+
+| season | 2017 | 2018 | 2019 | 2020 | 2021 | 2022 | 2023 | 2024 | 2025 |
+|---|---|---|---|---|---|---|---|---|---|
+| mean CLV | +0.26% | −1.30% | −0.39% | +0.96% | +0.13% | +0.62% | −1.78% | −1.92% | −2.42% |
+| z | 0.5 | −2.6 | −0.7 | 1.6 | 0.2 | 1.0 | **−3.1** | **−3.7** | **−4.9** |
+
+Pre-registered 2021 split: before −0.135% (SE 0.269), from 2021 −1.034%
+(SE 0.248), difference −0.90% (−2.5 SE).
+
+**What this actually says:**
+
+1. **There was never a positive-CLV era.** 2017–2022 pools to −0.135% ± 0.269%
+   — indistinguishable from zero. The +2% was the multiplicative bias.
+2. **From 2023 the model is consistently and significantly negative**, around
+   −2%, three seasons running at −3.1, −3.7 and −4.9 SE. That part is real and
+   is not the benchmark: 2023 has no Betfair data at all.
+3. **The gate is shut, and now for a properly measured reason.** Not "the edge
+   faded" but "there was no edge, and the model now loses to the close by about
+   what a model with no edge and some adverse selection would."
+
+**Also fixed:** `fair_line_preference` is a `BacktestConfig` field;
+`predictions` carries `fair_line_source`; `evaluation.fair_line_sources` and
+`evaluation.benchmark_changed` report and flag a switch; and
 `scripts/season_breakdown.py` prints a loud warning before the table. It fires
 correctly on the real window.
-
-**Not fixed, and the next decision:** the default is still
-`margin_method="multiplicative"`, which is now known to be the worse of the two.
-Changing it rewrites every historical number in this file, so it is a deliberate
-call rather than a quiet default flip — see "Immediate next step".
 
 ### Finding 1: the era split is 2023-24, not COVID (SUPERSEDED — see above)
 
@@ -354,27 +400,24 @@ holding an empty `raw}`. A brace expansion that ran under `sh`. Safe to delete.
 
 ## Immediate next step
 
-**Decide the margin-removal default, then re-baseline everything.**
+The measurement is now sound, so the numbers below can be trusted in a way
+nothing earlier in this file could be. Two candidates, in order:
 
-`multiplicative` is now known to be the worse of the two methods, tested
-against the exchange as ground truth. But neither is unbiased and switching
-rewrites every CLV number ever recorded in this file, so this is a decision to
-take deliberately and once:
+1. **Re-run the gate verdict and the tuner on the Shin scale.** Every headline
+   in this document above the RESOLVED section — the −0.944% gate figure, the
+   tuner's dev/holdout log losses, the +0.89% that started the whole era
+   investigation — was computed with multiplicative margin removal. Log loss is
+   affected too, not just CLV, because `market_log_loss` reads the same fair
+   line. Those numbers should be restated, not merely annotated. This is
+   mechanical and worth doing before anything else is built on top of them.
+2. **Then, if anything: why 2023.** The decline from ≈0% to ≈−2% at 2023 is
+   real, survives the benchmark fix, and is three seasons deep. Worth knowing
+   whether it is the market or the data. But note the honest framing — this is
+   a decline from *no edge* to *a small measured loss*, not the loss of
+   something valuable.
 
-1. Re-run the season breakdown three ways on a Pinnacle-pinned benchmark —
-   multiplicative, additive, and Betfair-where-available — and put the three
-   series side by side. Some of that exists in scratch already; it belongs in
-   a script.
-2. Consider a third option nobody has tried: **use Betfair as the benchmark
-   wherever it exists and simply refuse to report CLV before 2024.** A short
-   honest series beats a long one measured with a ruler that changed. The cost
-   is losing seven seasons; the benefit is that what remains means something.
-3. Whatever is chosen, restate the gate verdict against it. The current headline
-   (−0.944%) is a multiplicative-Pinnacle-then-Betfair number and is not a
-   measurement of anything stable.
-
-Do **not** retune or add leagues until this is settled. Every hyperparameter
-choice and every league comparison inherits this scale.
+**Do not** retune or add leagues before (1). Every hyperparameter choice and
+every league comparison inherits this scale, and the scale just changed.
 
 ---
 

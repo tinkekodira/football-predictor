@@ -92,7 +92,12 @@ class BacktestConfig:
     # Configurable so a run can be pinned to one book that covers the whole
     # window, which is the only way to compare CLV across seasons honestly.
     fair_line_preference: tuple[str, ...] = FAIR_LINE_PREFERENCE
-    margin_method: str = "multiplicative"
+    # "shin" since it is the only one of the three measured to reproduce the
+    # exchange's probabilities without a favourite-longshot gradient. This
+    # default changed after multiplicative was found to inflate CLV by 1.75
+    # points on the selections this model actually bets; numbers recorded
+    # before that change are on a different and worse scale.
+    margin_method: str = "shin"
     edge_threshold: float = 0.02
     min_price: float = 1.20
     max_price: float = 15.0

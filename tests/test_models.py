@@ -401,7 +401,7 @@ def test_overround_exceeds_one_for_real_prices():
     assert pricing.overround([2.10, 3.40, 3.80]) > 1.0
 
 
-@pytest.mark.parametrize("method", ["multiplicative", "additive"])
+@pytest.mark.parametrize("method", ["multiplicative", "additive", "shin"])
 def test_margin_removal_yields_a_distribution(method):
     probabilities = pricing.remove_margin([2.10, 3.40, 3.80], method=method)
     assert probabilities.sum() == pytest.approx(1.0)
@@ -415,6 +415,70 @@ def test_additive_removal_penalises_longshots_more():
     additive = pricing.remove_margin(prices, "additive")
     assert additive[-1] < multiplicative[-1]
     assert additive[0] > multiplicative[0]
+
+
+def test_the_default_method_is_shin():
+    """Pinned deliberately: this default changed, and the change matters.
+
+    Multiplicative was the default until it was measured against Betfair
+    Exchange closing prices and found to overstate longshots by more than half
+    a point - which, because this model bets longshots, inflated closing line
+    value by 1.75 points and manufactured an apparent era of edge. Anything
+    that flips this back should have to argue with a test.
+    """
+    prices = [1.30, 5.50, 12.0]
+    assert pricing.remove_margin(prices) == pytest.approx(
+        pricing.remove_margin(prices, "shin")
+    )
+
+
+def test_shin_lands_between_the_other_two_on_longshots():
+    """The bracketing that made Shin worth adding.
+
+    Measured against the exchange, multiplicative leaves longshots too high and
+    additive pushes them too low. Shin has a free parameter and lands between
+    them, which is why it comes out flat across probability bands where the
+    other two show a gradient.
+    """
+    prices = [1.30, 5.50, 12.0]
+    multiplicative = pricing.remove_margin(prices, "multiplicative")
+    additive = pricing.remove_margin(prices, "additive")
+    shin = pricing.remove_margin(prices, "shin")
+
+    assert additive[-1] < shin[-1] < multiplicative[-1]   # the longshot
+    assert multiplicative[0] < shin[0] < additive[0]      # the favourite
+
+
+def test_shin_is_a_no_op_on_a_market_with_no_margin():
+    # Prices that already imply exactly 1.0 leave nothing to remove.
+    prices = [2.0, 4.0, 4.0]
+    assert pricing.overround(prices) == pytest.approx(1.0)
+    assert pricing.remove_margin(prices, "shin") == pytest.approx([0.5, 0.25, 0.25])
+
+
+def test_shin_handles_a_two_outcome_market():
+    probabilities = pricing.remove_margin([1.90, 1.95], "shin")
+    assert probabilities.sum() == pytest.approx(1.0)
+    assert (probabilities > 0).all()
+
+
+def test_shin_falls_back_rather_than_failing_on_degenerate_prices():
+    # An overround below 1.0 is bad data, not an arbitrage to exploit. The
+    # caller gets normalised probabilities instead of an exception.
+    probabilities = pricing.remove_margin([3.0, 4.0, 5.0], "shin")
+    assert probabilities.sum() == pytest.approx(1.0)
+    assert (probabilities > 0).all()
+
+
+def test_shin_preserves_the_ordering_of_the_prices():
+    prices = [1.30, 5.50, 12.0]
+    shin = pricing.remove_margin(prices, "shin")
+    assert shin[0] > shin[1] > shin[2]
+
+
+def test_unknown_margin_method_is_rejected():
+    with pytest.raises(ValueError, match="Unknown method"):
+        pricing.remove_margin([2.0, 4.0, 4.0], "wishful")
 
 
 def test_expected_value_is_zero_at_the_fair_price():
