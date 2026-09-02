@@ -1,0 +1,330 @@
+"""The Dixon-Coles goals model.
+
+Two independent Poisson distributions, one per side, with rates driven by team
+attack and defence strengths and a home advantage. Dixon and Coles' 1997
+contribution was to notice that independent Poissons get the low-scoring
+results wrong - 0-0, 1-0, 0-1 and 1-1 happen at different rates than
+independence predicts - and to add a four-parameter correction for exactly
+those scorelines. Everything above 1-1 is left alone.
+
+The model produces two scoring rates for a fixture. Expanding those into a
+matrix of every plausible scoreline gives 1X2, over/under at any line, both
+teams to score, Asian handicap and correct score from a single fit. That is
+the main reason to model goals rather than markets: one coherent object, many
+prices, all of them automatically consistent with each other.
+
+What it does not include: xG (not in the free data source), lineups, injuries,
+or European fixture congestion. Those are Phase 5.
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+import warnings
+from dataclasses import dataclass
+
+import numpy as np
+import pandas as pd
+
+from . import base
+from .base import (
+    ConvergenceWarning,
+    InsufficientData,
+    TrainingSet,
+    build_priors,
+    linear_predictors,
+    minimise,
+    ridge_penalty,
+    team_gradient,
+    unpack_core,
+)
+
+# Rho is bounded well inside the region where the correction stays positive.
+# Empirically it lands around -0.03 to -0.13 for European league football.
+RHO_BOUNDS = (-0.25, 0.25)
+
+# Guards against log(0) when the correction is pushed to its limit.
+TAU_FLOOR = 1e-8
+
+
+def tau(x: np.ndarray, y: np.ndarray, lam: np.ndarray, mu: np.ndarray, rho: float):
+    """The Dixon-Coles low-score correction, and its partial derivatives.
+
+    Applies only to 0-0, 0-1, 1-0 and 1-1; every other scoreline is untouched.
+    Returns the correction alongside its derivatives with respect to the two
+    log-rates and rho, so the optimiser can use an analytic gradient.
+    """
+    value = np.ones_like(lam)
+    d_eta_home = np.zeros_like(lam)
+    d_eta_away = np.zeros_like(lam)
+    d_rho = np.zeros_like(lam)
+
+    is_00 = (x == 0) & (y == 0)
+    is_01 = (x == 0) & (y == 1)
+    is_10 = (x == 1) & (y == 0)
+    is_11 = (x == 1) & (y == 1)
+
+    value[is_00] = 1.0 - lam[is_00] * mu[is_00] * rho
+    value[is_01] = 1.0 + lam[is_01] * rho
+    value[is_10] = 1.0 + mu[is_10] * rho
+    value[is_11] = 1.0 - rho
+    value = np.maximum(value, TAU_FLOOR)
+
+    # d value / d log-rate, i.e. multiplied through by the rate itself.
+    d_eta_home[is_00] = -lam[is_00] * mu[is_00] * rho
+    d_eta_away[is_00] = -lam[is_00] * mu[is_00] * rho
+    d_eta_home[is_01] = lam[is_01] * rho
+    d_eta_away[is_10] = mu[is_10] * rho
+
+    d_rho[is_00] = -lam[is_00] * mu[is_00]
+    d_rho[is_01] = lam[is_01]
+    d_rho[is_10] = mu[is_10]
+    d_rho[is_11] = -1.0
+    return value, d_eta_home, d_eta_away, d_rho
+
+
+@dataclass
+class GoalsModel:
+    """A fitted Dixon-Coles model for one league at one point in time."""
+
+    league: str
+    as_of: dt.date
+    teams: list[str]
+    attack: np.ndarray
+    defence: np.ndarray
+    intercept: float
+    home_advantage: float
+    rho: float
+    half_life_days: float
+    ridge: float
+    n_matches: int
+    effective_n: float
+    converged: bool
+    match_counts: np.ndarray
+
+    # ----------------------------------------------------------------
+    # Prediction
+    # ----------------------------------------------------------------
+
+    def _position(self, team: str) -> int | None:
+        try:
+            return self.teams.index(team)
+        except ValueError:
+            return None
+
+    def rates(self, home_team: str, away_team: str) -> tuple[float, float]:
+        """Expected goals for each side.
+
+        A team the model has never seen is given the promoted-team prior
+        rather than an error: that is the honest answer for a club that has
+        just come up, and the caller is told about it through `is_known`.
+        """
+        home_pos = self._position(home_team)
+        away_pos = self._position(away_team)
+
+        home_attack = self.attack[home_pos] if home_pos is not None else base.PROMOTED_ATTACK_PRIOR
+        home_defence = self.defence[home_pos] if home_pos is not None else base.PROMOTED_DEFENCE_PRIOR
+        away_attack = self.attack[away_pos] if away_pos is not None else base.PROMOTED_ATTACK_PRIOR
+        away_defence = self.defence[away_pos] if away_pos is not None else base.PROMOTED_DEFENCE_PRIOR
+
+        lam = np.exp(self.intercept + self.home_advantage + home_attack - away_defence)
+        mu = np.exp(self.intercept + away_attack - home_defence)
+        return float(lam), float(mu)
+
+    def is_known(self, team: str) -> bool:
+        return self._position(team) is not None
+
+    def sample_size(self, team: str) -> int:
+        position = self._position(team)
+        return int(self.match_counts[position]) if position is not None else 0
+
+    def score_matrix(
+        self, home_team: str, away_team: str, max_goals: int = 12
+    ) -> np.ndarray:
+        """Probability of every scoreline from 0-0 up to max_goals each.
+
+        Truncating at 12 discards well under a thousandth of the mass; the
+        matrix is renormalised so the probabilities still sum to one.
+        """
+        lam, mu = self.rates(home_team, away_team)
+        return score_matrix_from_rates(lam, mu, self.rho, max_goals=max_goals)
+
+    def ratings(self) -> pd.DataFrame:
+        """Team strengths, strongest first, with the sample behind each.
+
+        `overall` is attack plus defence: a single number for ranking. It is
+        on the log scale, so a gap of 0.1 is roughly a 10% rate difference.
+        """
+        frame = pd.DataFrame(
+            {
+                "team": self.teams,
+                "attack": self.attack,
+                "defence": self.defence,
+                "overall": self.attack + self.defence,
+                "matches": self.match_counts,
+            }
+        )
+        return frame.sort_values("overall", ascending=False).reset_index(drop=True)
+
+    def summary(self) -> str:
+        return (
+            f"Dixon-Coles | {self.league} | as of {self.as_of} | "
+            f"{self.n_matches} matches (effective {self.effective_n:.0f}) | "
+            f"home advantage {np.exp(self.home_advantage):.3f}x | "
+            f"rho {self.rho:+.3f}"
+            + ("" if self.converged else " | DID NOT CONVERGE")
+        )
+
+
+def score_matrix_from_rates(
+    lam: float, mu: float, rho: float, max_goals: int = 12
+) -> np.ndarray:
+    """Build the scoreline matrix for a given pair of rates."""
+    from scipy import stats
+
+    goals = np.arange(max_goals + 1)
+    home_pmf = stats.poisson.pmf(goals, lam)
+    away_pmf = stats.poisson.pmf(goals, mu)
+    matrix = np.outer(home_pmf, away_pmf)
+
+    # The low-score correction, applied to the four affected cells only.
+    matrix[0, 0] *= 1.0 - lam * mu * rho
+    matrix[0, 1] *= 1.0 + lam * rho
+    matrix[1, 0] *= 1.0 + mu * rho
+    matrix[1, 1] *= 1.0 - rho
+
+    matrix = np.clip(matrix, 0.0, None)
+    total = matrix.sum()
+    if total <= 0:  # pragma: no cover - only reachable with absurd parameters
+        raise ValueError("Score matrix has no probability mass.")
+    return matrix / total
+
+
+# --------------------------------------------------------------------------
+# Fitting
+# --------------------------------------------------------------------------
+
+def build_goals_objective(
+    training: TrainingSet,
+    ridge: float = base.DEFAULT_RIDGE,
+    use_dixon_coles_correction: bool = True,
+):
+    """Build the objective the fitter minimises, and its starting point.
+
+    Exposed rather than buried inside `fit_goals_model` so that the test suite
+    can gradient-check the function that actually runs, instead of a copy of
+    it that might drift. Returns (objective, start, bounds), where objective
+    maps a parameter vector to (value, analytic gradient).
+    """
+    frame = training.frame
+    n_teams = len(training.index)
+    x = frame["home_goals"].to_numpy(dtype=float)
+    y = frame["away_goals"].to_numpy(dtype=float)
+    weights = training.weights
+    home_idx, away_idx = training.home_idx, training.away_idx
+    attack_prior, defence_prior = build_priors(training)
+
+    def objective(theta: np.ndarray):
+        intercept, home_advantage, attack, defence, extras = unpack_core(theta, n_teams)
+        rho = float(extras[0]) if use_dixon_coles_correction else 0.0
+
+        eta_home, eta_away = linear_predictors(theta, n_teams, home_idx, away_idx)
+        eta_home = np.clip(eta_home, -8.0, 3.0)
+        eta_away = np.clip(eta_away, -8.0, 3.0)
+        lam, mu = np.exp(eta_home), np.exp(eta_away)
+
+        # Poisson log-likelihood, dropping the constant factorial term.
+        log_lik = weights * (x * eta_home - lam + y * eta_away - mu)
+        residual_home = weights * (x - lam)
+        residual_away = weights * (y - mu)
+        d_rho = 0.0
+
+        if use_dixon_coles_correction:
+            correction, dc_home, dc_away, dc_rho = tau(x, y, lam, mu, rho)
+            log_lik = log_lik + weights * np.log(correction)
+            residual_home = residual_home + weights * dc_home / correction
+            residual_away = residual_away + weights * dc_away / correction
+            d_rho = float(np.sum(weights * dc_rho / correction))
+
+        penalty, d_penalty_attack, d_penalty_defence = ridge_penalty(
+            attack, defence, attack_prior, defence_prior, ridge
+        )
+        d_intercept, d_hfa, d_attack, d_defence = team_gradient(
+            residual_home, residual_away, home_idx, away_idx, n_teams
+        )
+
+        # Negated, because the optimiser minimises.
+        gradient = np.concatenate(
+            [
+                [-d_intercept, -d_hfa],
+                -d_attack + d_penalty_attack,
+                -d_defence + d_penalty_defence,
+                [-d_rho] if use_dixon_coles_correction else [],
+            ]
+        )
+        return -float(log_lik.sum()) + penalty, gradient
+
+    start = np.zeros(2 + 2 * n_teams + (1 if use_dixon_coles_correction else 0))
+    start[0] = np.log(max(np.average(np.r_[x, y], weights=np.r_[weights, weights]), 0.2))
+    start[1] = 0.2
+    if use_dixon_coles_correction:
+        start[-1] = -0.05
+
+    bounds = [(-5.0, 5.0), (-2.0, 2.0)] + [(-3.0, 3.0)] * (2 * n_teams)
+    if use_dixon_coles_correction:
+        bounds.append(RHO_BOUNDS)
+
+    return objective, start, bounds
+
+
+def fit_goals_model(
+    training: TrainingSet,
+    ridge: float = base.DEFAULT_RIDGE,
+    half_life_days: float = base.DEFAULT_HALF_LIFE_DAYS,
+    use_dixon_coles_correction: bool = True,
+) -> GoalsModel:
+    """Fit by weighted, penalised maximum likelihood.
+
+    The objective is the negative time-weighted log-likelihood plus the ridge
+    penalty. Gradients are analytic, which makes the fit fast enough for Phase
+    3 to refit thousands of times during a walk-forward backtest.
+    """
+    frame = training.frame
+    playable = frame["home_goals"].notna() & frame["away_goals"].notna()
+    if not playable.all():
+        training = training.subset(playable)
+    if training.n_matches < 50:
+        raise InsufficientData(
+            f"{training.league}: {training.n_matches} usable matches is too few to fit."
+        )
+
+    n_teams = len(training.index)
+    objective, start, bounds = build_goals_objective(
+        training, ridge=ridge, use_dixon_coles_correction=use_dixon_coles_correction
+    )
+
+    result = minimise(objective, start, bounds=bounds)
+    if not result.success:
+        warnings.warn(
+            f"Goals model for {training.league} did not converge: {result.message}",
+            ConvergenceWarning,
+            stacklevel=2,
+        )
+
+    intercept, home_advantage, attack, defence, extras = unpack_core(result.x, n_teams)
+    return GoalsModel(
+        league=training.league,
+        as_of=training.as_of,
+        teams=list(training.index.teams),
+        attack=np.asarray(attack, dtype=float),
+        defence=np.asarray(defence, dtype=float),
+        intercept=float(intercept),
+        home_advantage=float(home_advantage),
+        rho=float(extras[0]) if use_dixon_coles_correction else 0.0,
+        half_life_days=half_life_days,
+        ridge=ridge,
+        n_matches=training.n_matches,
+        effective_n=training.effective_n,
+        converged=bool(result.success),
+        match_counts=training.match_counts(),
+    )

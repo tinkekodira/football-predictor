@@ -1,0 +1,12 @@
+# Core pipeline
+pandas>=2.2
+numpy>=1.26
+requests>=2.31
+duckdb>=1.0
+scipy>=1.11
+
+# Web app
+streamlit>=1.49
+
+# Development
+pytest>=8.0
