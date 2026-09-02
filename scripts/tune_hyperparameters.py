@@ -43,13 +43,15 @@ DEFAULT_RIDGES = (1.0, 2.0, 5.0, 10.0, 20.0)
 
 def evaluate_setting(
     con, league: str, start: dt.date, end: dt.date, half_life: float, ridge: float,
-    step_days: int, scoring_market: str,
+    step_days: int, scoring_market: str, target: str = "goals",
+    blend_weight: float = 0.5,
 ) -> dict:
     """One grid point: run the walk-forward and return its scores."""
     settings = backtest.BacktestConfig(
         league=league, start=start, end=end, step_days=step_days,
         half_life_days=half_life, ridge=ridge,
         markets=(scoring_market,), fit_count_models=False,
+        target=target, blend_weight=blend_weight,
     )
     result = backtest.run_backtest(con, settings, verbose=False)
     score = evaluation.score_market(result.predictions, scoring_market)
@@ -78,6 +80,10 @@ def main() -> int:
                         choices=list(backtest.BETTABLE_MARKETS))
     parser.add_argument("--half-lives", type=float, nargs="+", default=list(DEFAULT_HALF_LIVES))
     parser.add_argument("--ridges", type=float, nargs="+", default=list(DEFAULT_RIDGES))
+    parser.add_argument("--target", default="goals",
+                        choices=["goals", "xg", "blend"],
+                        help="What team strengths are fitted to (default: %(default)s)")
+    parser.add_argument("--blend-weight", type=float, default=0.5)
     parser.add_argument("--csv", type=Path, default=None)
     parser.add_argument("--db", type=Path, default=config.DB_PATH)
     args = parser.parse_args()
@@ -97,7 +103,8 @@ def main() -> int:
     split = start + dt.timedelta(days=int(total_days * (1.0 - args.holdout)))
     grid = list(itertools.product(args.half_lives, args.ridges))
 
-    print(f"Tuning {config.LEAGUES[args.league]} on {args.market}")
+    print(f"Tuning {config.LEAGUES[args.league]} on {args.market}, "
+          f"strengths fitted to {args.target}")
     print(f"  development  {start} to {split}")
     print(f"  holdout      {split} to {end}")
     print(f"  grid         {len(grid)} settings\n")
@@ -109,7 +116,7 @@ def main() -> int:
         try:
             row = evaluate_setting(
                 con, args.league, start, split, half_life, ridge,
-                args.step_days, args.market,
+                args.step_days, args.market, args.target, args.blend_weight,
             )
         except ValueError as exc:
             print(f"  [{index}/{len(grid)}] skipped: {exc}")
@@ -133,8 +140,24 @@ def main() -> int:
           f"ridge {best['ridge']:.1f} (log loss {best['log_loss']:.4f})")
     print(f"Spread across the whole grid: {spread:.4f}")
     if spread < 0.005:
-        print("  That spread is small enough that these settings are near enough")
-        print("  interchangeable. Keeping the defaults is a reasonable choice.")
+        print("  That spread is small enough that the settings *searched here*")
+        print("  are near enough interchangeable with each other.")
+        searched_default = (
+            (table["ridge"] == base.DEFAULT_RIDGE)
+            & (table["half_life"] == base.DEFAULT_HALF_LIFE_DAYS)
+        ).any()
+        if searched_default and args.target == "goals":
+            print("  The current default is among them, so keeping it is a")
+            print("  reasonable choice.")
+        else:
+            # A narrow grid that excludes the default says nothing about the
+            # default. Reading "these are all alike" as "so keep what ships"
+            # is exactly wrong when what ships was never in the grid - which
+            # is how a flat low-ridge sweep once appeared to endorse a ridge
+            # five times larger than anything it tested.
+            print("  That says nothing about the current default, which was")
+            print(f"  {'not in this grid' if not searched_default else 'searched under a different target'}.")
+            print("  The holdout comparison below is the one that speaks to it.")
 
     if args.holdout > 0 and (end - split).days > 30:
         print("\nRe-running the winner on the holdout window it never saw...")
@@ -142,15 +165,23 @@ def main() -> int:
         holdout = evaluate_setting(
             con, args.league, split, end, float(best["half_life"]),
             float(best["ridge"]), args.step_days, args.market,
+            args.target, args.blend_weight,
         )
         predict_mod.clear_model_cache()
         defaults = evaluate_setting(
             con, args.league, split, end,
             base.DEFAULT_HALF_LIFE_DAYS, base.DEFAULT_RIDGE,
-            args.step_days, args.market,
+            args.step_days, args.market, "goals", args.blend_weight,
         )
-        print(f"  tuned setting   log loss {holdout['log_loss']:.4f}  (n={holdout['n']})")
-        print(f"  defaults        log loss {defaults['log_loss']:.4f}  (n={defaults['n']})")
+        # The baseline is deliberately the *current production default* -
+        # goals, stock half-life and ridge - not the same target at stock
+        # settings. The question worth answering is whether to change what
+        # ships, and that means comparing against what ships today.
+        print(f"  tuned setting   log loss {holdout['log_loss']:.4f}  (n={holdout['n']})"
+              f"   [{args.target}, half-life {best['half_life']:.0f}d, ridge {best['ridge']:.1f}]")
+        print(f"  defaults        log loss {defaults['log_loss']:.4f}  (n={defaults['n']})"
+              f"   [goals, half-life {base.DEFAULT_HALF_LIFE_DAYS:.0f}d, "
+              f"ridge {base.DEFAULT_RIDGE:.1f}]")
         difference = holdout["log_loss"] - defaults["log_loss"]
         if difference < -0.002:
             print(f"  -> the tuned setting held up out of sample ({difference:+.4f}).")

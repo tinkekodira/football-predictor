@@ -17,15 +17,20 @@ gambling-adjacent, and nobody should stake real money on it.
 
 ## Current status
 
-- 244 tests passing (`python -m pytest`). Was 205; 39 added this session.
+- 270 tests passing (`python -m pytest`). Was 205 at the start of the day.
 - **The CLV measurement was broken, and is now fixed and re-baselined.** A
   benchmark change in 2024 plus favourite-longshot bias in multiplicative
   margin removal inflated every historical CLV figure. `margin_method` now
   defaults to Shin, which measures unbiased against the exchange. The gate
   verdict and Finding 1 have both been restated on the new scale in place; the
   gate is **−1.500% (−9.1 SE)**, worse than the −0.944% it replaces.
-- **Model log loss and the tuner are unaffected**, and verified so: they never
-  touch `remove_margin`. Only CLV and `market_log_loss` moved.
+- **Model log loss and the tuner are unaffected** by the margin fix, and
+  verified so: they never touch `remove_margin`. Only CLV and
+  `market_log_loss` moved.
+- **The model defaults changed at the end of the day**: team strengths are now
+  fitted to a goals/xG blend with per-target shrinkage. Validated on four
+  leagues that had no part in choosing it (-0.0033 log loss, 4/4). Every
+  number recorded before that describes the old model.
 - Phase 3 backtest and hyperparameter tuner have both been run against real
   data on the Premier League.
 - **No demonstrated edge**, and the current era is measurably *negative*. See
@@ -456,15 +461,142 @@ Comparing targets at a shared ridge was never a fair test.
 The best cell closes **41% of the gap to the market** (0.0118 → 0.0070) against
 10% for xG alone.
 
-**Do not act on that table.** It is nine settings searched on one league with
-no holdout — precisely the error this document warns about everywhere else, and
-the tuner has already rejected a lower ridge once: it found ridge 2 best on its
-development window and *worse* out of sample, which is why the default is still
-5. What is genuinely new here is the mechanism, not the grid point: a slope
-above 1 is a reason to expect less shrinkage to help, decided before the search
-rather than after it. That is worth a holdout test, which is what
-`scripts/tune_hyperparameters.py --target blend` now exists to run. Believe the
-holdout, not the table above.
+That table on its own proves nothing — it is nine settings searched on one
+league with no holdout, and the tuner had already rejected a lower ridge once
+on exactly that basis. What was genuinely new was the *mechanism*: a slope
+above 1 is a reason to expect less shrinkage to help, and it was decided before
+the search rather than read off it. So it got a holdout test.
+
+### The holdout agrees, and this one is different from last time
+
+`scripts/tune_hyperparameters.py --league E0 --from 2018-08-01 --target blend
+--half-lives 180 360 --ridges 1 2 5 10` (the tuner now takes `--target`):
+
+Development window, ridge is cleanly monotone at both half-lives —
+1.0 → 0.5622, 2.0 → 0.5628, 5.0 → 0.5657, 10.0 → 0.5708.
+
+```
+Re-running the winner on the holdout window it never saw...
+  tuned setting   log loss 0.5760   [blend, half-life 180d, ridge 1.0]
+  defaults        log loss 0.5820   [goals, half-life 180d, ridge 5.0]
+  -> the tuned setting held up out of sample (-0.0060).
+```
+
+**−0.0060 out of sample**, against the +0.0005 *worse* that the previous tuning
+attempt produced. Five times the effect of xG on its own. The previous session's
+"keep the defaults" verdict was correct for what it tested and is now
+superseded for what it did not: it never varied the target, and at ridge 5 the
+target barely matters.
+
+Two cautions carried forward rather than waved away:
+
+- **Ridge 1.0 sat at the edge of the grid.** Last session's note says a winner
+  at the edge normally means extend the grid, and then says don't — but that
+  was because the holdout had rejected the gain. Here the holdout accepts it,
+  so the reasoning flipped and the grid was extended downward. **It is a broad
+  plateau, not an edge**: 0.1 → 0.5623, 0.25 → 0.5622, 0.5 → 0.5621,
+  1.0 → 0.5623, 2.0 → 0.5629, a spread of 0.0008 across the whole low range.
+  Holdout at ridge 0.5 is −0.0063, consistent with the −0.0060 at ridge 1.0.
+  Anything in 0.1–1.0 is equivalent; ridge 5 is the outlier. A flat optimum is
+  much more trustworthy than a spike, because it cannot be an artifact of one
+  lucky grid point.
+
+  That run also exposed a **misleading message in the tuner**, now fixed: it
+  reported "spread is small, keeping the defaults is a reasonable choice" for a
+  grid whose largest ridge was 2 and whose default is 5. The settings searched
+  were interchangeable *with each other*; the default was never in the grid and
+  the sentence said nothing about it. It now says so, and points at the holdout
+  instead.
+- **The −0.0060 confounds two changes**: goals → blend, and ridge 5 → 1. That
+  has now been decomposed on the holdout, and the answer is the interesting
+  part of this whole session.
+
+### The two changes are complementary, and that explains two earlier nulls
+
+Same tuner, same windows, **goals** target, ridges 0.5/1/2/5:
+
+```
+dev:      ridge 2.0 -> 0.5651   1.0 -> 0.5652   0.5 -> 0.5655   5.0 -> 0.5666
+holdout:  [goals, 180d, ridge 2.0] 0.5800  vs  defaults 0.5820   -> -0.0020
+          "no meaningful difference out of sample. Keep the defaults."
+```
+
+So lowering shrinkage **on goals alone buys about −0.002 and does not clear the
+bar**, while blend at low ridge buys **−0.0063**. The shrinkage fix is not
+independent of the target; the two only pay off together.
+
+The optimal ridge differs by target in exactly the direction the theory
+predicts:
+
+| target | best ridge on dev | reading |
+|---|---|---|
+| goals (noisier) | ~2.0 | needs more shrinkage; at 0.5 it is already overfitting (0.5655) |
+| blend (less noisy) | ~0.5 | tolerates far less shrinkage, which is what lets the better signal show |
+
+**This retrospectively explains two earlier negative findings, both of which
+were correct for what they tested:**
+
+1. The previous session's tuner said "keep the defaults". It only ever varied
+   half-life and ridge on the *goals* target, and on goals alone low ridge
+   really is worth almost nothing. Correct answer, incomplete question.
+2. `compare_targets.py` at the shipped ridge of 5 found xG and goals a dead
+   heat. At ridge 5 everything is shrunk hard towards the league average, which
+   masks how good the underlying signal is. Comparing targets at a shared
+   shrinkage was never a fair test, and the fair version is a cross-product.
+
+The general lesson, worth keeping: **a hyperparameter tuned for one input is
+not tuned for a better one.** Changing the data and holding the regularisation
+fixed will systematically understate the new data's value.
+
+### Validated across five leagues, and the defaults have changed
+
+`scripts/validate_setting.py --from 2018-08-01 --target goals blend
+--ridge 1 5`. E0 chose the setting, so it is reported but excluded from the
+verdict; the other four had no part in choosing it.
+
+| setting | mean Δ log loss | SE | t | better in |
+|---|---|---|---|---|
+| goals, ridge 1 | +0.00006 | 0.00085 | +0.07 | 2/4 — no better |
+| blend 0.5, ridge 5 | −0.00128 | 0.00058 | −2.22 | 3/4 |
+| **blend 0.5, ridge 1** | **−0.00325** | 0.00014 | **−23.7** | **4/4** |
+
+The four held-out leagues give −0.0031, −0.0030, −0.0032, −0.0036. That
+agreement matters more than the t-statistic, which is flattered by n=4 and by
+leagues that are not fully independent.
+
+**The calibration slope predicts the outcome, which is the part worth
+believing.** Leagues whose goals model was already near slope 1 (D1 at 1.02,
+F1 at 1.12) get *worse* with less shrinkage — their slopes overshoot to 0.82
+and 0.91. Leagues that were over-shrunk (I1 at 1.30, SP1 at 1.29) improve, and
+their slopes move to 1.04 and 1.03. `blend r5` is the most over-shrunk of all
+(1.17–1.51), which is exactly why it needs the lower ridge, and `blend r1`
+lands nearest 1 and wins. A mechanism decided in advance predicting
+out-of-sample results is a different kind of evidence from a grid winner.
+
+**So the defaults changed.** `models.base.DEFAULT_TARGET = "blend"`,
+`DEFAULT_BLEND_WEIGHT = 0.5`, and shrinkage is now per-target through
+`RECOMMENDED_RIDGE` / `default_ridge()` — 5.0 for goals, 1.0 for xG or blend.
+`DEFAULT_RIDGE` still exists at 5.0 for anything that asks for it by name.
+
+Three things that made this more than a one-line change, all of them tested:
+
+- **`target=None` means "the default, and adapt"; a named target is a
+  promise.** An unspecified target silently degrades to goals on a database
+  with no xG, because a default that hard-fails on an older database is
+  useless. An explicitly requested `"xg"` or `"blend"` still raises
+  `MissingExpectedGoals`. `build_models` turns the silent downgrade into a
+  note, since it is the layer that has somewhere to put one.
+- **`ridge=None` means "whatever suits the target".** An explicit value always
+  wins. The count models need a real number, so they take the value the goals
+  fit resolved rather than resolving it again and risking disagreement after a
+  fallback.
+- **The app couples the two controls.** Choosing a blend and leaving shrinkage
+  at the goals value is the worst available combination, so the recommended
+  value follows the target and is on by default.
+
+**Everything measured before this change was measured under the old defaults**
+— including the whole RESOLVED section above and the gate verdict. Those
+numbers are not wrong, but they describe a model that is no longer what ships.
 
 - `fbedge/understat.py` — fetch, cache and parse. Includes `TEAM_ALIASES`.
 - `scripts/build_xg.py` — joins xG onto existing matches, writes `match_xg`.

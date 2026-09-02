@@ -71,7 +71,7 @@ def load_options(db_path: str) -> pd.DataFrame:
 
 @st.cache_resource(show_spinner="Fitting models...")
 def fit_models(db_path: str, league: str, as_of: dt.date, half_life: float, ridge: float,
-               target: str = "goals", blend_weight: float = 0.5):
+               target: str | None = None, blend_weight: float = 0.5):
     """Fitted models for one league at one date. Cached: the fit is quick but
     not free, and the sidebar controls trigger a rerun on every change."""
     con = get_connection(db_path)
@@ -130,7 +130,7 @@ def selection_table(selections, as_percent: bool = True) -> pd.DataFrame:
 
 
 def render_forecast(db_path, prof, league, as_of, half_life, ridge,
-                    target="goals", blend_weight=0.5) -> None:
+                    target=None, blend_weight=0.5) -> None:
     """The Phase 2 model output for the selected fixture."""
     try:
         bundle = fit_models(db_path, league, as_of, half_life, ridge, target, blend_weight)
@@ -142,6 +142,7 @@ def render_forecast(db_path, prof, league, as_of, half_life, ridge,
     forecast = predict_mod.predict_fixture(
         con, prof.home_team, prof.away_team, as_of=as_of, league=league,
         half_life_days=half_life, ridge=ridge,
+        target=target, blend_weight=blend_weight,
     )
 
     for note in forecast.notes:
@@ -466,15 +467,9 @@ half_life = st.sidebar.slider(
     help="How fast old matches stop counting. A match one half-life ago carries "
          "half the weight of one played today.",
 )
-ridge = st.sidebar.slider(
-    "Shrinkage", 0.5, 20.0, float(model_base.DEFAULT_RIDGE), step=0.5,
-    help="How hard team ratings are pulled towards the league average. Higher "
-         "means a team needs more matches before the model believes its results.",
-)
-
 TARGET_LABELS = {
-    "goals": "Goals",
     "blend": "Goals + xG blend",
+    "goals": "Goals",
     "xg": "Expected goals",
 }
 target = st.sidebar.radio(
@@ -483,9 +478,10 @@ target = st.sidebar.radio(
     help="What team attack and defence strengths are fitted to. Goals are what "
          "you get paid on but they are a noisy sample of how a match went; xG "
          "sums chance quality instead and settles down over fewer matches. "
-         "Whichever is chosen, the overall goal level, home advantage and the "
-         "low-score correction are always re-estimated on real goals, so the "
-         "prices stay on the right scale.",
+         "The blend of the two is the default because it beat goals on four "
+         "leagues that had no part in choosing it. Whichever is chosen, the "
+         "overall goal level, home advantage and the low-score correction are "
+         "always re-estimated on real goals, so prices stay on the right scale.",
 )
 blend_weight = 0.5
 if target == "blend":
@@ -499,6 +495,31 @@ if target != "goals" and not database.has_xg(get_connection(db_path)):
         "until then the forecast falls back to goals."
     )
     target = "goals"
+
+# Shrinkage is tied to the target, because the right amount depends on how
+# noisy the thing being fitted is - about 5 for goals, about 1 for a blend.
+# A blend fitted at the goals value is the worst of both: the better signal,
+# shrunk until it cannot show. Rather than silently moving a slider under the
+# user, the coupling is made explicit and is on by default.
+# The label is kept free of the number on purpose: Streamlit derives a
+# widget's identity from its label, so a label that changed with the target
+# would make this a different checkbox on every switch and lose its state.
+recommended = model_base.default_ridge(target)
+use_recommended = st.sidebar.checkbox(
+    "Use recommended shrinkage", value=True, key="use_recommended_ridge",
+    help="The right amount of shrinkage depends on how noisy the target is, so "
+         "it moves with the choice above. Uncheck to set it by hand.",
+)
+ridge = recommended
+if use_recommended:
+    st.sidebar.caption(f"Shrinkage {recommended:g}, suited to {TARGET_LABELS[target].lower()}")
+else:
+    ridge = st.sidebar.slider(
+        "Shrinkage", 0.5, 20.0, float(recommended), step=0.5,
+        help="How hard team ratings are pulled towards the league average. "
+             "Higher means a team needs more matches before the model believes "
+             "its results.",
+    )
 
 scope = st.sidebar.radio(
     "Sample", options=list(profile_mod.SCOPES),

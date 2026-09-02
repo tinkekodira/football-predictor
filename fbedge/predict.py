@@ -150,11 +150,11 @@ def build_models(
     league: str,
     as_of: dt.date,
     half_life_days: float = base.DEFAULT_HALF_LIFE_DAYS,
-    ridge: float = base.DEFAULT_RIDGE,
+    ridge: float | None = None,
     use_cache: bool = True,
     fit_counts: bool = True,
-    target: str = "goals",
-    blend_weight: float = 0.5,
+    target: str | None = None,
+    blend_weight: float = base.DEFAULT_BLEND_WEIGHT,
 ) -> ModelBundle:
     """Fit goals, corners and cards models for one league.
 
@@ -178,8 +178,26 @@ def build_models(
         training, ridge=ridge, half_life_days=half_life_days,
         target=target, blend_weight=blend_weight,
     )
+    # `fit_goals_model` downgrades an unspecified target when the database has
+    # no xG. It is silent about it by design - it has no idea whether the
+    # caller cares - so the telling happens here, where `notes` exists and
+    # reaches the user.
+    if target is None and goals_model.target != base.DEFAULT_TARGET:
+        notes.append(
+            f"No expected-goals data for {league} before {as_of}, so team "
+            f"strengths were fitted to goals rather than "
+            f"{base.DEFAULT_TARGET!r}. Run scripts/build_xg.py to enable it; "
+            "the blend scored about 0.003 better on log loss across four "
+            "leagues that had no part in choosing it."
+        )
     if not goals_model.converged:
         notes.append("The goals model did not fully converge; treat prices as indicative.")
+
+    # The count models take a concrete number, and `ridge` may still be None
+    # here meaning "whatever suits the target". The goals fit has already
+    # resolved it, so reuse that rather than resolving it twice and risking
+    # the two disagreeing after a fallback.
+    ridge = goals_model.ridge
 
     optional: dict[str, counts.CountModel | None] = {"corners": None, "cards": None}
     if fit_counts:
@@ -226,10 +244,10 @@ def predict_fixture(
     league: str | None = None,
     referee: str | None = None,
     half_life_days: float = base.DEFAULT_HALF_LIFE_DAYS,
-    ridge: float = base.DEFAULT_RIDGE,
+    ridge: float | None = None,
     max_goals: int = 12,
-    target: str = "goals",
-    blend_weight: float = 0.5,
+    target: str | None = None,
+    blend_weight: float = base.DEFAULT_BLEND_WEIGHT,
 ) -> FixturePrediction:
     """Price every market for one fixture.
 

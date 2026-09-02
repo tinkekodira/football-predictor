@@ -267,7 +267,36 @@ def test_xg_model_is_calibrated_to_goals_not_to_xg():
 def test_target_is_recorded_on_the_model():
     training, _, _ = _synthetic_training()
     assert goals.fit_goals_model(training, target="xg").target == "xg"
+    assert goals.fit_goals_model(training, target="goals").target == "goals"
+    # Unspecified means the shipping default, which is the blend.
+    assert goals.fit_goals_model(training).target == base.DEFAULT_TARGET
+
+
+def test_an_unspecified_target_falls_back_when_there_is_no_xg():
+    """A default should degrade rather than fail on an older database."""
+    training, _, _ = _synthetic_training()
+    training.frame["home_xg"] = np.nan
+    training.frame["away_xg"] = np.nan
     assert goals.fit_goals_model(training).target == "goals"
+
+
+def test_an_explicit_target_still_refuses_when_there_is_no_xg():
+    """The fallback must not extend to a caller who asked for xG by name."""
+    training, _, _ = _synthetic_training()
+    training.frame["home_xg"] = np.nan
+    training.frame["away_xg"] = np.nan
+    with pytest.raises(base.MissingExpectedGoals, match="build_xg"):
+        goals.fit_goals_model(training, target="blend")
+
+
+def test_ridge_defaults_to_something_that_suits_the_target():
+    """One shrinkage value cannot serve targets with different noise levels."""
+    training, _, _ = _synthetic_training()
+    assert goals.fit_goals_model(training, target="goals").ridge == base.default_ridge("goals")
+    assert goals.fit_goals_model(training, target="blend").ridge == base.default_ridge("blend")
+    assert base.default_ridge("blend") < base.default_ridge("goals")
+    # An explicit value always wins over the recommendation.
+    assert goals.fit_goals_model(training, ridge=7.5, target="blend").ridge == 7.5
 
 
 def test_recalibration_leaves_team_strengths_untouched():

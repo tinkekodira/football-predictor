@@ -39,6 +39,36 @@ from scipy import optimize
 DEFAULT_HALF_LIFE_DAYS = 180.0
 DEFAULT_RIDGE = 5.0
 
+# What team strengths are fitted to by default. A half-and-half blend of goals
+# and expected goals beat plain goals on all four leagues that had no part in
+# choosing it (mean -0.0033 log loss, range 0.0006), so it ships. Falls back to
+# goals automatically when a database has no xG - see `predict.build_models`.
+DEFAULT_TARGET = "blend"
+DEFAULT_BLEND_WEIGHT = 0.5
+
+# **Shrinkage has to be chosen per target, not once.** Ridge trades variance
+# against bias, so the right amount depends on how noisy the thing being fitted
+# is, and xG is markedly less noisy than goals. Measured on a holdout the two
+# want different values, and using one number for both understates whichever
+# target it does not suit:
+#
+#   goals   best near 2-5; at 0.5 it is already overfitting, and lowering
+#           shrinkage on goals alone bought nothing out of sample (+0.00006
+#           across four held-out leagues).
+#   blend   best near 0.5-1.0, a broad flat plateau; the same drop here is
+#           worth -0.0033, because less shrinkage is what lets the better
+#           signal actually show.
+#
+# That interaction is why two earlier experiments came back negative: the
+# previous tuner only varied ridge on goals, and the first xG comparison held
+# ridge at 5 for both targets. Neither was wrong; both asked half the question.
+RECOMMENDED_RIDGE = {"goals": 5.0, "xg": 1.0, "blend": 1.0}
+
+
+def default_ridge(target: str = DEFAULT_TARGET) -> float:
+    """Shrinkage suited to how noisy `target` is. See `RECOMMENDED_RIDGE`."""
+    return RECOMMENDED_RIDGE.get(target, DEFAULT_RIDGE)
+
 # Teams with fewer matches than this in the training window are treated as
 # newcomers and given the promoted-team prior instead of the league average.
 PROMOTED_MATCH_THRESHOLD = 25
@@ -216,6 +246,18 @@ def load_training_set(
 
 class InsufficientData(RuntimeError):
     """Raised when there is too little history to fit anything honest."""
+
+
+class MissingExpectedGoals(InsufficientData):
+    """Raised when xG was asked for and the database has none.
+
+    A subclass rather than a flag because the two cases deserve different
+    handling and telling them apart matters. "This league has forty matches"
+    is a reason to give up; "this database was built before build_xg.py
+    existed" is a reason to fit on goals instead and say so. Catching the base
+    class for both would silently turn a genuinely unfittable league into a
+    successful fallback, which is the failure this project keeps finding.
+    """
 
 
 class ConvergenceWarning(RuntimeWarning):

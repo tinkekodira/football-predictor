@@ -84,7 +84,9 @@ class BacktestConfig:
     end: dt.date
     step_days: int = 7
     half_life_days: float = base.DEFAULT_HALF_LIFE_DAYS
-    ridge: float = base.DEFAULT_RIDGE
+    # None resolves to the shrinkage that suits `target`; see
+    # models.base.RECOMMENDED_RIDGE for why one value cannot serve both.
+    ridge: float | None = None
     markets: tuple[str, ...] = BETTABLE_MARKETS
     price_source: tuple[str, ...] = DEFAULT_PRICE_SOURCE
     closing_source: tuple[str, ...] = DEFAULT_CLOSING_SOURCE
@@ -105,8 +107,10 @@ class BacktestConfig:
     # What the goals model fits its team strengths to: "goals", "xg" or
     # "blend". Needs scripts/build_xg.py to have been run for anything but
     # "goals".
-    target: str = "goals"
-    blend_weight: float = 0.5
+    # None means the shipping default, degrading to goals when a database
+    # has no xG. Naming a target explicitly makes it a hard requirement.
+    target: str | None = None
+    blend_weight: float = base.DEFAULT_BLEND_WEIGHT
 
 
 @dataclass

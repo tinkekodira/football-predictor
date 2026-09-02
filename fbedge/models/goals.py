@@ -30,6 +30,7 @@ from . import base
 from .base import (
     ConvergenceWarning,
     InsufficientData,
+    MissingExpectedGoals,
     TrainingSet,
     build_priors,
     linear_predictors,
@@ -209,6 +210,12 @@ def score_matrix_from_rates(
 # Fitting
 # --------------------------------------------------------------------------
 
+def _has_expected_goals(training: TrainingSet) -> bool:
+    """Whether this training set carries usable xG at all."""
+    frame = training.frame
+    return "home_xg" in frame.columns and not frame["home_xg"].isna().all()
+
+
 def responses(
     training: TrainingSet, target: str = "goals", blend_weight: float = 0.5
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -242,7 +249,7 @@ def responses(
         return goals
 
     if "home_xg" not in frame.columns or frame["home_xg"].isna().all():
-        raise InsufficientData(
+        raise MissingExpectedGoals(
             f"{training.league}: no expected-goals data before {training.as_of}. "
             "Run scripts/build_xg.py to download and attach it."
         )
@@ -399,11 +406,11 @@ def recalibrate_on_goals(
 
 def fit_goals_model(
     training: TrainingSet,
-    ridge: float = base.DEFAULT_RIDGE,
+    ridge: float | None = None,
     half_life_days: float = base.DEFAULT_HALF_LIFE_DAYS,
     use_dixon_coles_correction: bool = True,
-    target: str = "goals",
-    blend_weight: float = 0.5,
+    target: str | None = None,
+    blend_weight: float = base.DEFAULT_BLEND_WEIGHT,
 ) -> GoalsModel:
     """Fit by weighted, penalised maximum likelihood.
 
@@ -417,6 +424,26 @@ def fit_goals_model(
     correction switched off, then level, home advantage and rho re-estimated on
     real goals by `recalibrate_on_goals`. See that function for why.
     """
+    # `target=None` means "the default, and adapt if the data cannot support
+    # it"; naming a target explicitly is a promise the caller wants kept, so
+    # that case still raises. The distinction matters: a default quietly
+    # degrading is helpful, a specific request quietly degrading is the bug
+    # this project has been bitten by repeatedly.
+    strict = target is not None
+    if target is None:
+        target = base.DEFAULT_TARGET
+        if target != "goals" and not _has_expected_goals(training):
+            target = "goals"
+    elif target != "goals" and not _has_expected_goals(training) and strict:
+        raise MissingExpectedGoals(
+            f"{training.league}: no expected-goals data before {training.as_of}. "
+            "Run scripts/build_xg.py to download and attach it."
+        )
+
+    # None means "whatever suits this target"; an explicit value always wins.
+    if ridge is None:
+        ridge = base.default_ridge(target)
+
     frame = training.frame
     playable = frame["home_goals"].notna() & frame["away_goals"].notna()
     if target != "goals":
