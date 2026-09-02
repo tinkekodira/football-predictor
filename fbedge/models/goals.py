@@ -101,6 +101,11 @@ class GoalsModel:
     effective_n: float
     converged: bool
     match_counts: np.ndarray
+    # What the team strengths were fitted to: "goals", "xg" or "blend". Worth
+    # carrying on the model rather than only in the caller, because two models
+    # that differ only in this are otherwise indistinguishable downstream and
+    # the whole point of the comparison is telling them apart.
+    target: str = "goals"
 
     # ----------------------------------------------------------------
     # Prediction
@@ -204,10 +209,63 @@ def score_matrix_from_rates(
 # Fitting
 # --------------------------------------------------------------------------
 
+def responses(
+    training: TrainingSet, target: str = "goals", blend_weight: float = 0.5
+) -> tuple[np.ndarray, np.ndarray]:
+    """The pair of quantities the rate model is fitted to.
+
+    `"goals"` is what the model has always used. `"xg"` fits the same team
+    strengths to expected goals instead, and `"blend"` to a weighted average of
+    the two, with `blend_weight` the share given to xG.
+
+    **Why fitting to a continuous quantity is legitimate here.** The objective
+    is a Poisson log-likelihood with the factorial term dropped, because it does
+    not depend on the parameters. What remains, `y*log(mu) - mu`, is a perfectly
+    good quasi-likelihood for any non-negative response, and its score equation
+    still sets the fitted rate to the weighted mean of the response. So xG can
+    be substituted for goals without touching the arithmetic. What does have to
+    change is the Dixon-Coles correction, which tests for exact 0-0, 1-0, 0-1
+    and 1-1 scorelines and would never fire on a continuous input; see
+    `fit_goals_model` for how that is handled.
+
+    Raises:
+        InsufficientData: when xG was asked for and the database has none.
+            Silently falling back to goals would produce a model that quietly
+            is not the one that was requested.
+    """
+    frame = training.frame
+    goals = (
+        frame["home_goals"].to_numpy(dtype=float),
+        frame["away_goals"].to_numpy(dtype=float),
+    )
+    if target == "goals":
+        return goals
+
+    if "home_xg" not in frame.columns or frame["home_xg"].isna().all():
+        raise InsufficientData(
+            f"{training.league}: no expected-goals data before {training.as_of}. "
+            "Run scripts/build_xg.py to download and attach it."
+        )
+    xg = (
+        frame["home_xg"].to_numpy(dtype=float),
+        frame["away_xg"].to_numpy(dtype=float),
+    )
+    if target == "xg":
+        return xg
+    if target == "blend":
+        weight = float(np.clip(blend_weight, 0.0, 1.0))
+        return (
+            weight * xg[0] + (1.0 - weight) * goals[0],
+            weight * xg[1] + (1.0 - weight) * goals[1],
+        )
+    raise ValueError(f"Unknown target {target!r}; use 'goals', 'xg' or 'blend'.")
+
+
 def build_goals_objective(
     training: TrainingSet,
     ridge: float = base.DEFAULT_RIDGE,
     use_dixon_coles_correction: bool = True,
+    response: tuple[np.ndarray, np.ndarray] | None = None,
 ):
     """Build the objective the fitter minimises, and its starting point.
 
@@ -215,11 +273,15 @@ def build_goals_objective(
     can gradient-check the function that actually runs, instead of a copy of
     it that might drift. Returns (objective, start, bounds), where objective
     maps a parameter vector to (value, analytic gradient).
+
+    `response` overrides what is being fitted; it defaults to actual goals.
     """
     frame = training.frame
     n_teams = len(training.index)
-    x = frame["home_goals"].to_numpy(dtype=float)
-    y = frame["away_goals"].to_numpy(dtype=float)
+    x, y = response if response is not None else (
+        frame["home_goals"].to_numpy(dtype=float),
+        frame["away_goals"].to_numpy(dtype=float),
+    )
     weights = training.weights
     home_idx, away_idx = training.home_idx, training.away_idx
     attack_prior, defence_prior = build_priors(training)
@@ -277,30 +339,108 @@ def build_goals_objective(
     return objective, start, bounds
 
 
+def recalibrate_on_goals(
+    training: TrainingSet,
+    attack: np.ndarray,
+    defence: np.ndarray,
+    use_dixon_coles_correction: bool = True,
+) -> tuple[float, float, float]:
+    """Refit only the level, the home advantage and rho, on actual goals.
+
+    This is what makes an xG-fitted model usable for pricing goal markets.
+    Expected goals and goals do not share a scale: across this database xG runs
+    about 4% above goals for home sides, so feeding xG-derived rates straight
+    into a scoreline matrix would over-predict every total in the book. Nor is
+    home advantage necessarily the same in the two quantities, and rho is a
+    correction for the way *goals* clump at 0-0 and 1-1 - a property of the
+    discrete outcome that has no counterpart in a continuous expectation.
+
+    So the division of labour is: the attack and defence strengths come from
+    xG, because that is where xG is better; and the three parameters that
+    describe how those strengths turn into goals are re-estimated on goals,
+    because that is what is being predicted. Team strengths are held fixed here
+    and not re-penalised, since they were already shrunk in the first stage.
+
+    Returns (intercept, home_advantage, rho).
+    """
+    frame = training.frame
+    x = frame["home_goals"].to_numpy(dtype=float)
+    y = frame["away_goals"].to_numpy(dtype=float)
+    weights = training.weights
+    home_idx, away_idx = training.home_idx, training.away_idx
+    attack_home, defence_away = attack[home_idx], defence[away_idx]
+    attack_away, defence_home = attack[away_idx], defence[home_idx]
+
+    def negative_log_likelihood(theta: np.ndarray) -> float:
+        intercept, home_advantage = float(theta[0]), float(theta[1])
+        rho = float(theta[2]) if use_dixon_coles_correction else 0.0
+        eta_home = np.clip(intercept + home_advantage + attack_home - defence_away, -8.0, 3.0)
+        eta_away = np.clip(intercept + attack_away - defence_home, -8.0, 3.0)
+        lam, mu = np.exp(eta_home), np.exp(eta_away)
+        log_lik = weights * (x * eta_home - lam + y * eta_away - mu)
+        if use_dixon_coles_correction:
+            correction, _, _, _ = tau(x, y, lam, mu, rho)
+            log_lik = log_lik + weights * np.log(correction)
+        return -float(log_lik.sum())
+
+    start = np.array([np.log(max(np.average(np.r_[x, y], weights=np.r_[weights, weights]), 0.2)), 0.2, -0.05])
+    bounds = [(-5.0, 5.0), (-2.0, 2.0), RHO_BOUNDS]
+    if not use_dixon_coles_correction:
+        start, bounds = start[:2], bounds[:2]
+
+    from scipy import optimize
+
+    result = optimize.minimize(
+        negative_log_likelihood, start, method="L-BFGS-B", bounds=bounds
+    )
+    rho = float(result.x[2]) if use_dixon_coles_correction else 0.0
+    return float(result.x[0]), float(result.x[1]), rho
+
+
 def fit_goals_model(
     training: TrainingSet,
     ridge: float = base.DEFAULT_RIDGE,
     half_life_days: float = base.DEFAULT_HALF_LIFE_DAYS,
     use_dixon_coles_correction: bool = True,
+    target: str = "goals",
+    blend_weight: float = 0.5,
 ) -> GoalsModel:
     """Fit by weighted, penalised maximum likelihood.
 
     The objective is the negative time-weighted log-likelihood plus the ridge
     penalty. Gradients are analytic, which makes the fit fast enough for Phase
     3 to refit thousands of times during a walk-forward backtest.
+
+    `target` selects what the team strengths are fitted to: `"goals"` (the
+    original behaviour), `"xg"`, or `"blend"`. Anything other than `"goals"`
+    runs in two stages - strengths from the chosen target with the Dixon-Coles
+    correction switched off, then level, home advantage and rho re-estimated on
+    real goals by `recalibrate_on_goals`. See that function for why.
     """
     frame = training.frame
     playable = frame["home_goals"].notna() & frame["away_goals"].notna()
+    if target != "goals":
+        # A match without xG cannot contribute to the first stage, and letting
+        # the two stages see different matches would make the recalibration
+        # correct for a population the strengths were never fitted on.
+        playable = playable & frame["home_xg"].notna() & frame["away_xg"].notna()
     if not playable.all():
         training = training.subset(playable)
     if training.n_matches < 50:
         raise InsufficientData(
-            f"{training.league}: {training.n_matches} usable matches is too few to fit."
+            f"{training.league}: {training.n_matches} usable matches is too few to fit"
+            + (" on xG. Run scripts/build_xg.py." if target != "goals" else ".")
         )
 
     n_teams = len(training.index)
+    # The correction describes how discrete goals clump, so it is only fitted
+    # in the first stage when the first stage is itself about goals.
+    first_stage_dc = use_dixon_coles_correction and target == "goals"
     objective, start, bounds = build_goals_objective(
-        training, ridge=ridge, use_dixon_coles_correction=use_dixon_coles_correction
+        training,
+        ridge=ridge,
+        use_dixon_coles_correction=first_stage_dc,
+        response=responses(training, target, blend_weight),
     )
 
     result = minimise(objective, start, bounds=bounds)
@@ -312,6 +452,16 @@ def fit_goals_model(
         )
 
     intercept, home_advantage, attack, defence, extras = unpack_core(result.x, n_teams)
+    attack = np.asarray(attack, dtype=float)
+    defence = np.asarray(defence, dtype=float)
+
+    if target == "goals":
+        rho = float(extras[0]) if use_dixon_coles_correction else 0.0
+    else:
+        intercept, home_advantage, rho = recalibrate_on_goals(
+            training, attack, defence, use_dixon_coles_correction
+        )
+
     return GoalsModel(
         league=training.league,
         as_of=training.as_of,
@@ -320,9 +470,10 @@ def fit_goals_model(
         defence=np.asarray(defence, dtype=float),
         intercept=float(intercept),
         home_advantage=float(home_advantage),
-        rho=float(extras[0]) if use_dixon_coles_correction else 0.0,
+        rho=rho,
         half_life_days=half_life_days,
         ridge=ridge,
+        target=target,
         n_matches=training.n_matches,
         effective_n=training.effective_n,
         converged=bool(result.success),

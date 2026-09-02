@@ -102,6 +102,11 @@ class BacktestConfig:
     min_price: float = 1.20
     max_price: float = 15.0
     fit_count_models: bool = False
+    # What the goals model fits its team strengths to: "goals", "xg" or
+    # "blend". Needs scripts/build_xg.py to have been run for anything but
+    # "goals".
+    target: str = "goals"
+    blend_weight: float = 0.5
 
 
 @dataclass
@@ -292,6 +297,7 @@ def run_backtest(con, config: BacktestConfig, verbose: bool = True) -> BacktestR
                     con, config.league, as_of,
                     half_life_days=config.half_life_days, ridge=config.ridge,
                     use_cache=False, fit_counts=config.fit_count_models,
+                    target=config.target, blend_weight=config.blend_weight,
                 )
         except base.InsufficientData as exc:
             notes.append(f"{as_of}: skipped, {exc}")

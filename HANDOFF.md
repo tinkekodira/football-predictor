@@ -382,7 +382,129 @@ beatable.
 
 ---
 
-## What was added in the shape session (most recent)
+## What was added in the xG session (most recent)
+
+The first genuinely new *capability* in a while, rather than a correction to an
+existing one: expected goals from Understat, and the option to fit team
+strengths to them.
+
+### The result: a small real improvement, and it is the blend that does it
+
+`scripts/compare_targets.py --from 2018-08-01`, all five leagues, 1X2:
+
+| league | goals | xg | blend 0.5 | gap to market: goals → blend |
+|---|---|---|---|---|
+| E0 | 0.5709 | 0.5708 | **0.5697** | 0.0118 → 0.0106 |
+| SP1 | 0.5823 | 0.5822 | **0.5812** | 0.0132 → 0.0121 |
+| I1 | **0.5760** | 0.5783 | 0.5762 | 0.0136 → 0.0137 |
+| D1 | 0.5818 | **0.5788** | 0.5792 | 0.0125 → 0.0098 |
+| F1 | 0.5898 | 0.5888 | **0.5882** | 0.0123 → 0.0108 |
+
+Treated as one fixed rule applied to every league, which is the only honest way
+to read a five-league table:
+
+- **blend 0.5: mean −0.00126 log loss, SE 0.00045, t = −2.79, better in 4 of 5.**
+- pure xG: mean −0.00038, SE 0.00085, t = −0.44. Not distinguishable from zero.
+
+So **the blend helps and pure xG does not**, which is not what the theory
+predicted. The mechanism looks like variance reduction rather than new
+information: averaging two noisy views of the same rate beats either. Read
+per-league the answer is different in every league — xG wins in D1, goals wins
+in I1, the blend wins in three — and that spread is wider than any single
+league's improvement, which is exactly the multiple-comparisons trap the
+handoff warns about for leagues. The script now says so instead of reporting a
+per-league winner.
+
+Size of the win, stated plainly: it closes about **10% of the gap to the
+closing line** (mean gap 0.0127 → 0.0114). CLV stays clearly negative in all
+five leagues. **This does not reopen the gate** and was never going to.
+
+One suggestive detail worth following up: xG helps most in D1, which has the
+fewest matches (306 a season, not 380) and the best-calibrated goals model
+(slope 1.02 against 1.12-1.30 elsewhere). If xG's advantage really is variance
+reduction, it should pay most where the goals estimate is thinnest, and that is
+what the one clean case shows.
+
+### The bigger finding, which is not about xG
+
+**Every model in every league has a calibration slope above 1** — 1.02 to 1.30
+on goals, rising to 1.28-1.62 on xG. Above 1 means the probabilities are packed
+too tightly together: the model is systematically *under*-confident about which
+fixtures are unusual, and shrinkage is the cause. Fitting on a less noisy target
+makes it worse because the ridge penalty was never re-tuned for a less noisy
+target.
+
+That is a larger and cheaper win than xG if it holds, and it was found by the
+calibration-slope diagnostic built in the previous session rather than by
+anything in this one.
+
+`scripts/compare_targets.py --league E0 --from 2018-08-01 --ridge 1 2 5`:
+
+| ridge | goals | xg | blend 0.5 | goals slope |
+|---|---|---|---|---|
+| 5 (ships today) | 0.5709 | 0.5708 | 0.5697 | 1.201 |
+| 2 | 0.5693 | 0.5677 | 0.5668 | 1.039 |
+| 1 | 0.5692 | 0.5669 | **0.5661** | **0.977** |
+
+Two things fall out. **The slope diagnostic was right**: it said the model was
+over-shrunk, and dropping ridge from 5 to 1 moves the slope from 1.201 to 0.977
+— near-perfect calibration — with log loss improving in step. And **xG was
+being penalised by a shrinkage value calibrated for noisier data**: at ridge 5
+xG and goals are a dead heat (0.5708 vs 0.5709), at ridge 1 xG wins by 0.0023.
+Comparing targets at a shared ridge was never a fair test.
+
+The best cell closes **41% of the gap to the market** (0.0118 → 0.0070) against
+10% for xG alone.
+
+**Do not act on that table.** It is nine settings searched on one league with
+no holdout — precisely the error this document warns about everywhere else, and
+the tuner has already rejected a lower ridge once: it found ridge 2 best on its
+development window and *worse* out of sample, which is why the default is still
+5. What is genuinely new here is the mechanism, not the grid point: a slope
+above 1 is a reason to expect less shrinkage to help, decided before the search
+rather than after it. That is worth a holdout test, which is what
+`scripts/tune_hyperparameters.py --target blend` now exists to run. Believe the
+holdout, not the table above.
+
+- `fbedge/understat.py` — fetch, cache and parse. Includes `TEAM_ALIASES`.
+- `scripts/build_xg.py` — joins xG onto existing matches, writes `match_xg`.
+- `fbedge/models/goals.py` — `responses`, `recalibrate_on_goals`, and a
+  `target` argument on `fit_goals_model` taking `"goals"`, `"xg"` or `"blend"`.
+- `fbedge/models/base.py` — `load_training_set` LEFT JOINs `match_xg` when the
+  table exists, so an older database still fits.
+- `fbedge/predict.py`, `fbedge/backtest.py`, `app.py` — `target` and
+  `blend_weight` plumbed through; the app gets a "Rate teams on" selector.
+- `scripts/compare_targets.py` — the head-to-head.
+- `tests/test_understat.py` — 18 tests.
+
+Four things worth not undoing:
+
+- **Understat moved its data out of the page HTML.** Every published scraper,
+  including the `understat` PyPI package, looks for
+  `var datesData = JSON.parse(` in the league page. That is no longer there,
+  and those scrapers now return *nothing* without raising. The data comes from
+  `getLeagueData/<league>/<season>`, gzipped JSON, found by reading
+  `js/league.min.js`. `fetch_season` raises `UnderstatError` rather than
+  returning empty on any shape change, and the tests pin that.
+- **The 41 team aliases were derived by diffing, not guessed.** 41 of 156 names
+  differ between the two sources and the differences are not systematic —
+  Understat's "Milan" is AC Milan while its "Inter" matches ours exactly, so a
+  fuzzy matcher would silently merge two clubs. `test_alias_table_is_injective`
+  guards exactly that. The join currently lands at 100% in all five leagues,
+  and `build_xg.py` refuses to write a league below 80%.
+- **Fitting to a continuous target needed no new maths.** The Poisson objective
+  already drops the factorial, so `y*log(mu) - mu` is a valid quasi-likelihood
+  for xG and its score equation still sets the rate to the weighted mean. What
+  did need care is the Dixon-Coles correction, which tests for exact 0-0 and
+  1-1 scorelines and can never fire on a continuous input; it is switched off
+  in the first stage and re-estimated on real goals in the second.
+- **The two-stage fit is the load-bearing design.** Strengths come from xG;
+  level, home advantage and rho are re-estimated on actual goals by
+  `recalibrate_on_goals`. Skipping that would over-predict every total in the
+  book, because xG runs ~4% above goals for home sides across this database.
+  `test_xg_model_is_calibrated_to_goals_not_to_xg` pins it.
+
+## What was added in the shape session
 
 - `fbedge/markets.py` — `total_distribution`, the match-total pmf from a
   scoreline matrix.

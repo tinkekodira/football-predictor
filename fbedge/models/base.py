@@ -137,6 +137,17 @@ class TrainingSet:
         )
 
 
+def _has_table(con, name: str) -> bool:
+    """Whether a table exists, so an optional one can be joined conditionally."""
+    try:
+        found = con.execute(
+            "SELECT 1 FROM information_schema.tables WHERE table_name = ?", [name]
+        ).fetchone()
+    except Exception:  # pragma: no cover - dialects without information_schema
+        return False
+    return found is not None
+
+
 def load_training_set(
     con,
     league: str,
@@ -153,19 +164,30 @@ def load_training_set(
         min_matches: below this the fit is refused outright rather than
             returning parameters nobody should act on.
     """
-    sql = """
-        SELECT match_id, date, home_team, away_team, referee,
-               home_goals, away_goals, home_corners, away_corners,
-               home_yellows, away_yellows, home_reds, away_reds,
-               home_shots, away_shots, home_sot, away_sot
-        FROM matches
-        WHERE league = ? AND date < ?
+    # LEFT JOIN, and the whole join is skipped when match_xg does not exist, so
+    # a database built before scripts/build_xg.py was run still fits. A model
+    # asked for xG it does not have should fail in `fit_goals_model` with a
+    # sentence saying which script to run, not here with a SQL error.
+    xg_select, xg_join = "NULL AS home_xg, NULL AS away_xg", ""
+    if _has_table(con, "match_xg"):
+        xg_select = "x.home_xg, x.away_xg"
+        xg_join = "LEFT JOIN match_xg x USING (match_id)"
+
+    sql = f"""
+        SELECT m.match_id, m.date, m.home_team, m.away_team, m.referee,
+               m.home_goals, m.away_goals, m.home_corners, m.away_corners,
+               m.home_yellows, m.away_yellows, m.home_reds, m.away_reds,
+               m.home_shots, m.away_shots, m.home_sot, m.away_sot,
+               {xg_select}
+        FROM matches m
+        {xg_join}
+        WHERE m.league = ? AND m.date < ?
     """
     params: list = [league, as_of]
     if max_age_days is not None:
-        sql += " AND date >= ?"
+        sql += " AND m.date >= ?"
         params.append(pd.Timestamp(as_of) - pd.Timedelta(days=max_age_days))
-    sql += " ORDER BY date"
+    sql += " ORDER BY m.date"
 
     frame = con.execute(sql, params).df()
     if len(frame) < min_matches:

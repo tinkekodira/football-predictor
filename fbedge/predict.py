@@ -153,6 +153,8 @@ def build_models(
     ridge: float = base.DEFAULT_RIDGE,
     use_cache: bool = True,
     fit_counts: bool = True,
+    target: str = "goals",
+    blend_weight: float = 0.5,
 ) -> ModelBundle:
     """Fit goals, corners and cards models for one league.
 
@@ -163,14 +165,18 @@ def build_models(
     `fit_counts=False` skips them entirely, which roughly triples the speed of
     a hyperparameter sweep that only scores goal markets.
     """
-    key = (league, as_of, half_life_days, ridge, fit_counts, _fingerprint(con, league))
+    key = (
+        league, as_of, half_life_days, ridge, fit_counts, target, blend_weight,
+        _fingerprint(con, league),
+    )
     if use_cache and key in _MODEL_CACHE:
         return _MODEL_CACHE[key]
 
     training = base.load_training_set(con, league, as_of, half_life_days=half_life_days)
     notes: list[str] = []
     goals_model = goals.fit_goals_model(
-        training, ridge=ridge, half_life_days=half_life_days
+        training, ridge=ridge, half_life_days=half_life_days,
+        target=target, blend_weight=blend_weight,
     )
     if not goals_model.converged:
         notes.append("The goals model did not fully converge; treat prices as indicative.")
@@ -222,6 +228,8 @@ def predict_fixture(
     half_life_days: float = base.DEFAULT_HALF_LIFE_DAYS,
     ridge: float = base.DEFAULT_RIDGE,
     max_goals: int = 12,
+    target: str = "goals",
+    blend_weight: float = 0.5,
 ) -> FixturePrediction:
     """Price every market for one fixture.
 
@@ -245,7 +253,8 @@ def predict_fixture(
         )
 
     bundle = build_models(
-        con, league, as_of, half_life_days=half_life_days, ridge=ridge
+        con, league, as_of, half_life_days=half_life_days, ridge=ridge,
+        target=target, blend_weight=blend_weight,
     )
     notes = list(bundle.notes)
 

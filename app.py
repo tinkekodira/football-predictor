@@ -70,12 +70,14 @@ def load_options(db_path: str) -> pd.DataFrame:
 
 
 @st.cache_resource(show_spinner="Fitting models...")
-def fit_models(db_path: str, league: str, as_of: dt.date, half_life: float, ridge: float):
+def fit_models(db_path: str, league: str, as_of: dt.date, half_life: float, ridge: float,
+               target: str = "goals", blend_weight: float = 0.5):
     """Fitted models for one league at one date. Cached: the fit is quick but
     not free, and the sidebar controls trigger a rerun on every change."""
     con = get_connection(db_path)
     return predict_mod.build_models(
-        con, league, as_of, half_life_days=half_life, ridge=ridge, use_cache=False
+        con, league, as_of, half_life_days=half_life, ridge=ridge, use_cache=False,
+        target=target, blend_weight=blend_weight,
     )
 
 
@@ -127,10 +129,11 @@ def selection_table(selections, as_percent: bool = True) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def render_forecast(db_path, prof, league, as_of, half_life, ridge) -> None:
+def render_forecast(db_path, prof, league, as_of, half_life, ridge,
+                    target="goals", blend_weight=0.5) -> None:
     """The Phase 2 model output for the selected fixture."""
     try:
-        bundle = fit_models(db_path, league, as_of, half_life, ridge)
+        bundle = fit_models(db_path, league, as_of, half_life, ridge, target, blend_weight)
     except model_base.InsufficientData as exc:
         st.error(f"Not enough history to fit a model: {exc}")
         return
@@ -469,6 +472,34 @@ ridge = st.sidebar.slider(
          "means a team needs more matches before the model believes its results.",
 )
 
+TARGET_LABELS = {
+    "goals": "Goals",
+    "blend": "Goals + xG blend",
+    "xg": "Expected goals",
+}
+target = st.sidebar.radio(
+    "Rate teams on", options=list(TARGET_LABELS),
+    format_func=lambda t: TARGET_LABELS[t], index=0,
+    help="What team attack and defence strengths are fitted to. Goals are what "
+         "you get paid on but they are a noisy sample of how a match went; xG "
+         "sums chance quality instead and settles down over fewer matches. "
+         "Whichever is chosen, the overall goal level, home advantage and the "
+         "low-score correction are always re-estimated on real goals, so the "
+         "prices stay on the right scale.",
+)
+blend_weight = 0.5
+if target == "blend":
+    blend_weight = st.sidebar.slider(
+        "Weight on xG", 0.0, 1.0, 0.5, step=0.1,
+        help="0 is the goals model, 1 is the pure xG model.",
+    )
+if target != "goals" and not database.has_xg(get_connection(db_path)):
+    st.sidebar.warning(
+        "No xG in this database. Run `python scripts/build_xg.py` to download it; "
+        "until then the forecast falls back to goals."
+    )
+    target = "goals"
+
 scope = st.sidebar.radio(
     "Sample", options=list(profile_mod.SCOPES),
     format_func=lambda s: profile_mod.SCOPE_LABELS[s],
@@ -585,7 +616,8 @@ with forecast_tab:
     if not show_model:
         st.info("Model forecast is switched off in the sidebar.")
     else:
-        render_forecast(db_path, prof, league, as_of, half_life, ridge)
+        render_forecast(db_path, prof, league, as_of, half_life, ridge,
+                        target, blend_weight)
 
 with quality_tab:
     render_quality(db_path, league, as_of, half_life, ridge)

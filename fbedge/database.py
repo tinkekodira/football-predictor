@@ -250,3 +250,19 @@ def summary(con) -> pd.DataFrame:
         ORDER BY league, season_start_year
         """
     ).df()
+
+
+def has_xg(con) -> bool:
+    """Whether `scripts/build_xg.py` has been run against this database.
+
+    Callers use this to offer the xG model only when it can actually be fitted,
+    rather than letting the fit fail in front of a user who has no idea which
+    script they were supposed to run first.
+    """
+    try:
+        found = con.execute(
+            "SELECT 1 FROM information_schema.tables WHERE table_name = 'match_xg'"
+        ).fetchone()
+    except Exception:
+        return False
+    return found is not None

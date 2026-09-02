@@ -23,6 +23,7 @@ python -m venv .venv && source .venv/bin/activate    # Windows: .venv\Scripts\ac
 pip install -r requirements.txt
 
 python scripts/build_database.py --seasons 10        # ~5 min, ~50 CSV downloads
+python scripts/build_xg.py                           # optional: expected goals
 streamlit run app.py
 ```
 
@@ -132,6 +133,7 @@ fbedge/
   settlement.py  what a bet actually returned, quarter lines included
   backtest.py    walk-forward: refit, price the book's lines, settle
   evaluation.py  calibration, closing line value, staking, bootstrap
+  understat.py   expected goals: fetch, cache, team-name mapping
 scripts/
   build_database.py    one command: download, normalise, load, verify
   make_sample_data.py  synthetic CSVs for offline work and tests
@@ -139,8 +141,12 @@ scripts/
   predict_fixture.py   the text version of the model forecast
   backtest.py          walk-forward backtest with a full report
   tune_hyperparameters.py  grid search with a held-out window
+  build_xg.py          download Understat xG and attach it to matches
+  compare_targets.py   goals vs xG vs blend, scored on the same matches
+  season_breakdown.py  CLV by season, with a benchmark-change warning
+  goals_shape.py       is the goals distribution the right shape
 app.py                 the Streamlit web app
-tests/                 184 tests, run with: python -m pytest
+tests/                 266 tests, run with: python -m pytest
 ```
 
 Four design decisions worth knowing about:
