@@ -18,12 +18,14 @@ gambling-adjacent, and nobody should stake real money on it.
 ## Current status
 
 - 244 tests passing (`python -m pytest`). Was 205; 39 added this session.
-- **The CLV measurement was broken, and is now fixed.** A benchmark change in
-  2024 plus favourite-longshot bias in multiplicative margin removal inflated
-  every historical CLV figure. `margin_method` now defaults to Shin, which
-  measures unbiased against the exchange. **Every CLV and market-log-loss
-  number above the RESOLVED section predates the fix and is wrong** — read that
-  section before trusting any of them, the gate verdict included.
+- **The CLV measurement was broken, and is now fixed and re-baselined.** A
+  benchmark change in 2024 plus favourite-longshot bias in multiplicative
+  margin removal inflated every historical CLV figure. `margin_method` now
+  defaults to Shin, which measures unbiased against the exchange. The gate
+  verdict and Finding 1 have both been restated on the new scale in place; the
+  gate is **−1.500% (−9.1 SE)**, worse than the −0.944% it replaces.
+- **Model log loss and the tuner are unaffected**, and verified so: they never
+  touch `remove_margin`. Only CLV and `market_log_loss` moved.
 - Phase 3 backtest and hyperparameter tuner have both been run against real
   data on the Premier League.
 - **No demonstrated edge**, and the current era is measurably *negative*. See
@@ -36,13 +38,37 @@ gambling-adjacent, and nobody should stake real money on it.
 
 ## The decision gate: closed
 
-Backtest, E0, 2022-08-01 to 2026-08-31, defaults (half-life 180d, ridge 5):
+**Restated on the Shin scale.** The figures in this section were recomputed
+after the margin-removal fix; the superseded multiplicative numbers are shown
+alongside so the size of the correction is visible.
 
-- Mean CLV **−0.944%**, SE 0.125%, n=4379. That is 7.5 SEs below zero.
-- Model log loss beats the base rate (0.577 vs 0.637) and trails the market
-  (0.577 vs 0.563). The model knows something; the closing line knows more.
+Backtest, E0, 2022-08-01 to 2026-08-31, defaults (half-life 180d, ridge 5),
+n=4379 bets:
+
+| | multiplicative (old) | **Shin (current)** |
+|---|---|---|
+| mean CLV | −0.944% | **−1.500%** |
+| clustered SE | 0.163% | 0.165% |
+| z | −5.8 | **−9.1** |
+
+Two corrections, not one. The scale changed, and the old headline also quoted
+**7.5 SE using the naive standard error**, which the project's own
+`clustered_mean` shows overstates precision here. Clustered by match it was
+−5.8 SE then and is −9.1 SE now. The verdict moves in the same direction
+either way: further from zero, not closer.
+
+- Model log loss is **unaffected** at 0.5767 against a base rate of 0.6365, and
+  still trails the market (0.5626). The model knows something real about match
+  outcomes; the closing line knows more. Only the *market* side of that
+  comparison depends on margin removal, and it barely moves (0.5628 → 0.5626).
 
 Tuner, E0, dev 2019-08-01 to 2024-07-15, holdout 2024-07-15 onward:
+
+**The tuner needs no re-run.** It sorts the grid on `model_log_loss`, which is
+computed from the model's probabilities and the settled outcomes and never
+touches `remove_margin`. Verified directly: dev-window model log loss is
+0.571182 under both methods, identical to six decimal places. Everything below
+therefore stands as written.
 
 - Best development setting: half-life 360d, ridge 2.0 (log loss 0.5691).
 - On the holdout it scored 0.5885 against 0.5880 for the defaults. The tuned
@@ -59,6 +85,26 @@ every setting tried.
 ---
 
 ## Finding 1: CLV may be era-dependent, and this is the live question
+
+> **DEAD. The premise was a measurement artifact.** The two figures below
+> disagreed in sign, and that disagreement is what launched the entire era
+> investigation. Restated on the Shin scale, on the same windows and the same
+> bets, they agree:
+>
+> | 1X2 only | multiplicative (old) | **Shin (current)** |
+> |---|---|---|
+> | backtest 2022-08 → 2026-08, n=2012 | −0.52% (−1.9 SE) | **−1.46% (−5.3 SE)** |
+> | tuner dev 2019-08 → 2024-07, n=2553 | +1.21% (+5.0 SE) | **−0.24% (−1.0 SE)** |
+>
+> The "+0.89%" that looked like a 5-sigma positive edge is −0.24% and
+> indistinguishable from zero once the longshot bias is removed. Nothing needed
+> reconciling; the ruler was bent. The reasoning below is kept for audit only —
+> it is a careful chain of inference from two numbers that were both wrong.
+>
+> (The old tuner-window figure reproduces here at +1.21% on 2553 bets rather
+> than the recorded +0.89% on 2446; the dev window's end date is computed from
+> a holdout fraction and this re-run approximates it as 2024-07-15. The sign
+> and magnitude match, which is all that mattered.)
 
 The two runs above disagree about the sign of CLV, and the code says they
 shouldn't. Both call the same `evaluation.closing_line_value`, both use
@@ -400,24 +446,33 @@ holding an empty `raw}`. A brace expansion that ran under `sh`. Safe to delete.
 
 ## Immediate next step
 
-The measurement is now sound, so the numbers below can be trusted in a way
-nothing earlier in this file could be. Two candidates, in order:
+**The re-baseline is done.** The gate verdict and Finding 1 have been restated
+in place, and the tuner was checked and needs no re-run. Every CLV figure in
+this document is now on one scale.
 
-1. **Re-run the gate verdict and the tuner on the Shin scale.** Every headline
-   in this document above the RESOLVED section — the −0.944% gate figure, the
-   tuner's dev/holdout log losses, the +0.89% that started the whole era
-   investigation — was computed with multiplicative margin removal. Log loss is
-   affected too, not just CLV, because `market_log_loss` reads the same fair
-   line. Those numbers should be restated, not merely annotated. This is
-   mechanical and worth doing before anything else is built on top of them.
-2. **Then, if anything: why 2023.** The decline from ≈0% to ≈−2% at 2023 is
-   real, survives the benchmark fix, and is three seasons deep. Worth knowing
-   whether it is the market or the data. But note the honest framing — this is
-   a decline from *no edge* to *a small measured loss*, not the loss of
-   something valuable.
+What remains, honestly assessed:
 
-**Do not** retune or add leagues before (1). Every hyperparameter choice and
-every league comparison inherits this scale, and the scale just changed.
+1. **Why 2023.** The decline from ≈0% to ≈−2% survives the benchmark fix, is
+   three seasons deep (−3.1, −3.7, −4.9 SE), and 2023 carries no Betfair data
+   so it is not the instrument. Worth understanding whether it is the market or
+   the data pipeline. Note the framing though: this is a decline from *no edge*
+   to *a small measured loss*, not the loss of something that was ever worth
+   having.
+2. **Other leagues, as a genuine test rather than a search.** The margin fix
+   applies to all five. Four more leagues would say whether "≈0% through 2022,
+   ≈−2% after" is a property of this model or of the Premier League. Write the
+   plan down first and report all five outcomes, including the dull ones.
+3. **Better inputs** — the list further down is unchanged by any of this, and
+   is still the only route to a real edge rather than a better-measured
+   absence of one.
+
+Consider seriously, though, that the project has now answered its own question.
+Three sessions of investigation into an apparent edge ended with the edge being
+a defect in the measuring instrument. On a correct scale this model has never
+beaten the closing line in nine seasons of data, and the model's own log loss
+has trailed the market throughout. "Well-built, well-tested, no edge" is a
+legitimate place to stop, and it is better evidenced now than the alternative
+ever was.
 
 ---
 
