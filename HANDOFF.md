@@ -17,7 +17,10 @@ gambling-adjacent, and nobody should stake real money on it.
 
 ## Current status
 
-- 227 tests passing (`python -m pytest`). Was 205; 22 added this session.
+- 236 tests passing (`python -m pytest`). Was 205; 31 added this session.
+- **The CLV measurement was broken by a benchmark change in 2024.** Read the
+  first RESOLVED subsection before trusting any CLV figure in this document,
+  including the gate verdict.
 - Phase 3 backtest and hyperparameter tuner have both been run against real
   data on the Premier League.
 - **No demonstrated edge**, and the current era is measurably *negative*. See
@@ -91,7 +94,72 @@ Both were run. Neither survived contact with the data in the form written
 below. The original text is kept underneath so the reasoning can be audited,
 but **read this section first and treat the two below as superseded.**
 
-### Finding 1: the era split is 2023-24, not COVID
+### THE MEASUREMENT WAS BROKEN. Read this before any CLV number in this file.
+
+Most of the "CLV regime change" is an artifact of the benchmark changing, not
+of the market changing. This supersedes the season table immediately below it
+as well as the original gate verdict.
+
+**`betfair_exchange` first appears in the source in 2024-25, and it heads
+`FAIR_LINE_PREFERENCE`.** So the margin-free closing line that CLV is measured
+against switched from Pinnacle to Betfair in exactly the season CLV appeared to
+collapse. Nothing in any output said so.
+
+Holding the benchmark fixed at Pinnacle across the whole window:
+
+| season | 2023 | 2024 | 2025 |
+|---|---|---|---|
+| as published (benchmark switches) | +0.76% | **−1.56%** | **−1.96%** |
+| pinned to Pinnacle | +0.76% | **+0.22%** | **+0.08%** |
+
+2017-2023 are unchanged, because Pinnacle was already supplying them.
+
+**Which benchmark is right? Betfair.** It closes at a 0.56% overround against
+Pinnacle's ~2.9%, so the exchange is the closest thing to margin-free truth in
+the data. On the 785 bets where both exist, Betfair scores the same bets
+**−1.75pp** lower than Pinnacle (SE 0.16, 11 SE), and the gap is stable across
+both seasons (−1.78, −1.70).
+
+**Why:** `remove_margin` defaults to `multiplicative`, which has exactly the
+favourite-longshot bias `pricing.py`'s own docstring predicted — tested against
+Betfair as ground truth, it overstates longshots by +0.60pp and understates
+favourites by −0.64pp, monotonically across bands. **The model bets longshots**
+(median backed-side closing probability 0.224, 90th percentile 0.406), so the
+bias lands almost entirely on the selections that become bets and flatters CLV.
+
+That test had never been run. `pricing.py` says the choice "should be tested
+rather than made on aesthetics"; Betfair finally makes it testable, and
+**additive wins** — errors roughly 5x flatter across bands, better |error|
+(0.00535 vs 0.00555) and RMSE. But additive over-corrects in the other
+direction: on the same bets it lands −0.77pp *below* Betfair (−5.1 SE). Neither
+method is unbiased; they bracket the truth, with additive about 2.3x closer.
+
+**Consequences, in order of how much they hurt:**
+
+1. **There was probably never a +2% edge.** Under Pinnacle-additive there is no
+   positive era anywhere in the series (2017 −0.34%, 2020 +0.43%, 2022 +0.03%,
+   2023 −2.67%). Under Pinnacle-multiplicative there is a +2% era. Betfair,
+   where it exists, sits between them. Best estimate on a consistent scale: the
+   model hovered within about a point of zero through 2022, then drifted
+   negative. The "era" story was mostly the ruler.
+2. **The COVID/crowds story and my own "the market sharpened" story are both
+   dead.** The 2024-25 discontinuity is the instrument.
+3. **The gate stays shut,** and for a better reason than before: not "the edge
+   went away" but "the edge was never measured on a stable scale, and on the
+   most trustworthy scale available it is negative."
+
+**Fixed so far:** `fair_line_preference` is now a `BacktestConfig` field;
+`predictions` carries a `fair_line_source` column; `evaluation.fair_line_sources`
+and `evaluation.benchmark_changed` report and flag a switch; and
+`scripts/season_breakdown.py` prints a loud warning before the table. It fires
+correctly on the real window.
+
+**Not fixed, and the next decision:** the default is still
+`margin_method="multiplicative"`, which is now known to be the worse of the two.
+Changing it rewrites every historical number in this file, so it is a deliberate
+call rather than a quiet default flip — see "Immediate next step".
+
+### Finding 1: the era split is 2023-24, not COVID (SUPERSEDED — see above)
 
 `python scripts/season_breakdown.py --league E0 --from 2017-08-01 --market 1x2`
 (the database starts at 2017/18, so nine full seasons, not ten):
@@ -284,10 +352,36 @@ holding an empty `raw}`. A brace expansion that ran under `sh`. Safe to delete.
 
 ---
 
-## Immediate next step — DONE, results in the RESOLVED section above
+## Immediate next step
+
+**Decide the margin-removal default, then re-baseline everything.**
+
+`multiplicative` is now known to be the worse of the two methods, tested
+against the exchange as ground truth. But neither is unbiased and switching
+rewrites every CLV number ever recorded in this file, so this is a decision to
+take deliberately and once:
+
+1. Re-run the season breakdown three ways on a Pinnacle-pinned benchmark —
+   multiplicative, additive, and Betfair-where-available — and put the three
+   series side by side. Some of that exists in scratch already; it belongs in
+   a script.
+2. Consider a third option nobody has tried: **use Betfair as the benchmark
+   wherever it exists and simply refuse to report CLV before 2024.** A short
+   honest series beats a long one measured with a ruler that changed. The cost
+   is losing seven seasons; the benefit is that what remains means something.
+3. Whatever is chosen, restate the gate verdict against it. The current headline
+   (−0.944%) is a multiplicative-Pinnacle-then-Betfair number and is not a
+   measurement of anything stable.
+
+Do **not** retune or add leagues until this is settled. Every hyperparameter
+choice and every league comparison inherits this scale.
+
+---
+
+## Previous immediate next step — DONE, results in the RESOLVED section above
 
 Both runs below have been carried out. Kept for the reasoning; do not re-run
-expecting news. The live question is now the 2024–25 CLV collapse.
+expecting news.
 
 First confirm how far back the database goes — do **not** rebuild it:
 

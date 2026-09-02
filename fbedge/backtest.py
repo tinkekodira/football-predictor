@@ -59,6 +59,15 @@ DEFAULT_CLOSING_SOURCE = ("betfair_exchange", "pinnacle", "market_avg", "market_
 
 # Order of preference when deriving the margin-free closing probabilities.
 # Reading these off a soft bookmaker would bake its margin into the benchmark.
+#
+# **This list is a measuring instrument, and changing which entry supplies a
+# given season silently rewrites every CLV number for it.** That is not
+# hypothetical: `betfair_exchange` first appears in the source in 2024-25, and
+# because it sits at the head of this list the benchmark switched from Pinnacle
+# to Betfair in exactly the season CLV appeared to collapse. Roughly three
+# quarters of that "regime change" was the instrument, not the market. Whatever
+# preference is used, check `fair_line_sources` for a season where the source
+# changes before reading anything into a change in the numbers.
 FAIR_LINE_PREFERENCE = (
     "betfair_exchange", "pinnacle", "market_avg", "market_max", "bet365",
 )
@@ -79,6 +88,10 @@ class BacktestConfig:
     markets: tuple[str, ...] = BETTABLE_MARKETS
     price_source: tuple[str, ...] = DEFAULT_PRICE_SOURCE
     closing_source: tuple[str, ...] = DEFAULT_CLOSING_SOURCE
+    # Which book supplies the margin-free closing line CLV is measured against.
+    # Configurable so a run can be pinned to one book that covers the whole
+    # window, which is the only way to compare CLV across seasons honestly.
+    fair_line_preference: tuple[str, ...] = FAIR_LINE_PREFERENCE
     margin_method: str = "multiplicative"
     edge_threshold: float = 0.02
     min_price: float = 1.20
@@ -156,8 +169,10 @@ def _pick_price(group: pd.DataFrame, phase: str, preference: tuple[str, ...]):
     return np.nan, None
 
 
-def _market_probabilities(group: pd.DataFrame, method: str) -> dict[tuple, float]:
-    """Margin-free closing probabilities, keyed by (market, selection, line).
+def _market_probabilities(
+    group: pd.DataFrame, method: str, preference: tuple[str, ...] = FAIR_LINE_PREFERENCE
+) -> dict[tuple, tuple[float, str]]:
+    """Margin-free closing probabilities and the book each came from.
 
     A market is only usable once every leg of it is priced: two thirds of a
     1X2 tells you nothing about where the margin sits.
@@ -166,8 +181,13 @@ def _market_probabilities(group: pd.DataFrame, method: str) -> dict[tuple, float
     once for the whole match. This source carries closing prices for 1X2 long
     before it carries them for totals, so a global fallback would silently
     leave the totals market unpriced whenever any closing price existed.
+
+    The supplying bookmaker is returned alongside the probability, not thrown
+    away. Which book answered is part of the measurement: a CLV series that
+    changes benchmark halfway through is not one series, and without this the
+    change leaves no trace in the output.
     """
-    out: dict[tuple, float] = {}
+    out: dict[tuple, tuple[float, str]] = {}
     keyed = group.copy()
     # Both halves of a handicap must land in the same group even though they
     # carry opposite lines, so lines are normalised to the home team's view
@@ -183,12 +203,15 @@ def _market_probabilities(group: pd.DataFrame, method: str) -> dict[tuple, float
             phase_rows = rows[rows["phase"] == phase]
             if phase_rows.empty:
                 continue
-            if _fill_market(out, market, phase_rows, method):
+            if _fill_market(out, market, phase_rows, method, preference):
                 break
     return out
 
 
-def _fill_market(out: dict, market, rows: pd.DataFrame, method: str) -> bool:
+def _fill_market(
+    out: dict, market, rows: pd.DataFrame, method: str,
+    preference: tuple[str, ...] = FAIR_LINE_PREFERENCE,
+) -> bool:
     """Add one complete market's fair probabilities. True if any were added.
 
     The probabilities that come back are *conditional on the bet not pushing*,
@@ -199,7 +222,11 @@ def _fill_market(out: dict, market, rows: pd.DataFrame, method: str) -> bool:
     """
     expected = 3 if market == "1x2" else 2
     available = set(rows["bookmaker"])
-    ordered = [b for b in FAIR_LINE_PREFERENCE if b in available]
+    ordered = [b for b in preference if b in available]
+    # Anything not named in the preference is still tried, in name order, so a
+    # market is priced whenever it can be. That maximises coverage at the cost
+    # of letting a soft book supply the benchmark, which is why the choice is
+    # recorded rather than left implicit.
     ordered += sorted(available - set(ordered))
     for bookmaker in ordered:
         book_rows = rows[rows["bookmaker"] == bookmaker]
@@ -213,7 +240,9 @@ def _fill_market(out: dict, market, rows: pd.DataFrame, method: str) -> bool:
         for selection, line, probability in zip(
             deduped["selection"], deduped["line"], fair
         ):
-            out.setdefault((market, selection, _line_key(line)), float(probability))
+            out.setdefault(
+                (market, selection, _line_key(line)), (float(probability), bookmaker)
+            )
         return True
     return False
 
@@ -307,7 +336,9 @@ def _score_match(row, bundle, match_odds: pd.DataFrame | None, config):
     if match_odds is None or match_odds.empty:
         return [], total_record
 
-    market_probabilities = _market_probabilities(match_odds, config.margin_method)
+    market_probabilities = _market_probabilities(
+        match_odds, config.margin_method, config.fair_line_preference
+    )
     records: list[dict] = []
 
     grouped = match_odds.groupby(["market", "selection", "line"], dropna=False)
@@ -330,8 +361,8 @@ def _score_match(row, bundle, match_odds: pd.DataFrame | None, config):
         same_book_close = (
             _same_book_price(group, "close", taken_from) if taken_from else np.nan
         )
-        closing_fair = market_probabilities.get(
-            (market, selection, line_value), np.nan
+        closing_fair, fair_line_source = market_probabilities.get(
+            (market, selection, line_value), (np.nan, None)
         )
 
         expected_value = (
@@ -351,6 +382,9 @@ def _score_match(row, bundle, match_odds: pd.DataFrame | None, config):
                 "push_probability": priced.push_probability,
                 "fair_price": priced.fair_price,
                 "market_probability": closing_fair,
+                # Which book the benchmark came from. CLV is only comparable
+                # across seasons where this is the same.
+                "fair_line_source": fair_line_source,
                 "price_taken": price_taken,
                 "price_source": taken_from,
                 "price_close": price_close,

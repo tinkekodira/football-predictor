@@ -118,6 +118,19 @@ def main() -> int:
         print("  No seasons with priced selections.")
         return 1
 
+    sources = evaluation.fair_line_sources(result.predictions, season=seasons)
+    changes = evaluation.benchmark_changed(sources)
+    if changes:
+        print("\n!!! THE BENCHMARK CHANGED INSIDE THIS WINDOW !!!")
+        for line in changes:
+            print(f"  {line}")
+        print("  Closing line value is measured against this benchmark, so the")
+        print("  seasons either side of a change are not on one scale. Re-run")
+        print("  pinned to a single book before reading the table below:")
+        print("    BacktestConfig(fair_line_preference=('pinnacle',), ...)")
+        print("\n  Benchmark by season:")
+        print(sources.to_string(index=False, float_format=lambda v: f"{v:.3f}"))
+
     print("\n--- Closing line value by season "
           "-----------------------------------------")
     print(table.to_string(index=False, float_format=lambda v: f"{v:.4f}"))

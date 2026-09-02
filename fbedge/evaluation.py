@@ -867,6 +867,80 @@ def _bucket_row(label: str, hit: np.ndarray, probabilities: np.ndarray) -> dict:
     }
 
 
+def fair_line_sources(
+    predictions: pd.DataFrame,
+    season: pd.Series | None = None,
+    cutover_month: int = 8,
+) -> pd.DataFrame:
+    """Which bookmaker supplied the closing benchmark, season by season.
+
+    Run this before reading anything into a change in CLV over time. Closing
+    line value is a comparison against a benchmark, so a season where the
+    benchmark changed is not comparable with the seasons around it, and nothing
+    in a CLV table says that it changed.
+
+    This is not a hypothetical failure. `betfair_exchange` first appears in
+    football-data.co.uk in 2024-25, and it heads `FAIR_LINE_PREFERENCE`, so the
+    benchmark switched from Pinnacle to Betfair in exactly the season CLV
+    appeared to fall off a cliff. Measured on the seasons where both exist, the
+    exchange scores the same bets about 1.75 points lower than Pinnacle does -
+    which is most of the apparent collapse. The market moved much less than the
+    ruler did.
+
+    `share` is the fraction of that season's priced selections the book
+    supplied, so a season split between two books is visible rather than
+    rounded to whichever won.
+    """
+    if predictions.empty or "fair_line_source" not in predictions.columns:
+        return pd.DataFrame()
+
+    frame = predictions.copy().reset_index(drop=True)
+    frame = frame[frame["fair_line_source"].notna()]
+    if frame.empty:
+        return pd.DataFrame()
+
+    if season is not None:
+        frame["season"] = pd.Series(season).reset_index(drop=True).loc[frame.index]
+    else:
+        frame["season"] = season_labels(frame["date"], cutover_month).loc[frame.index]
+
+    counts = (
+        frame.groupby(["season", "fair_line_source"]).size().rename("selections")
+    ).reset_index()
+    totals = counts.groupby("season")["selections"].transform("sum")
+    counts["share"] = counts["selections"] / totals
+    return counts.sort_values(
+        ["season", "selections"], ascending=[True, False]
+    ).reset_index(drop=True)
+
+
+def benchmark_changed(sources: pd.DataFrame, threshold: float = 0.5) -> list[str]:
+    """Seasons where the dominant benchmark differs from the season before.
+
+    Returns human-readable warnings rather than a bare flag, because the only
+    useful response is to say which seasons stopped being comparable and to
+    whom. `threshold` is the share a book needs before it counts as the one
+    that supplied the season.
+    """
+    if sources.empty:
+        return []
+    dominant = {}
+    for season, group in sources.groupby("season"):
+        top = group.sort_values("share", ascending=False).iloc[0]
+        if top["share"] >= threshold:
+            dominant[int(season)] = str(top["fair_line_source"])
+
+    warnings_out = []
+    ordered = sorted(dominant)
+    for previous, current in zip(ordered, ordered[1:]):
+        if dominant[previous] != dominant[current]:
+            warnings_out.append(
+                f"{current}: benchmark changed from {dominant[previous]} to "
+                f"{dominant[current]}; CLV before and after is not comparable."
+            )
+    return warnings_out
+
+
 def era_comparison(
     predictions: pd.DataFrame,
     split_season: int,
