@@ -446,3 +446,216 @@ def summarise(result, markets_to_score: tuple[str, ...] | None = None) -> dict:
         "clv": closing_line_value(bets),
         "bets": int(len(bets)),
     }
+
+
+# --------------------------------------------------------------------------
+# Season and era breakdown
+# --------------------------------------------------------------------------
+
+def season_labels(dates, cutover_month: int = 8) -> pd.Series:
+    """Label each date with the calendar year its season started in.
+
+    A European league season spans two calendar years, so a raw year is the
+    wrong grouping: it splits a single season in half at the winter break and
+    pools the end of one season with the start of the next.
+
+    The cutover defaults to August because that is when the top-5 leagues
+    start and, more importantly, because it puts the COVID-delayed finish of
+    2019-20 (matches played in June and July 2020) back in the 2019 season
+    where it belongs. A January cutover, or the more obvious "July" guess,
+    would file those matches under 2020-21 and smear the one regime this
+    breakdown exists to isolate across two rows.
+
+    No top-5 league plays league fixtures in July in a normal year, so the
+    boundary is unambiguous in practice. Where the caller has the authoritative
+    `season_start_year` column from the database, pass that instead of relying
+    on this.
+    """
+    stamps = pd.to_datetime(pd.Series(dates).reset_index(drop=True))
+    years = stamps.dt.year.to_numpy()
+    months = stamps.dt.month.to_numpy()
+    return pd.Series(np.where(months >= cutover_month, years, years - 1), name="season")
+
+
+def clustered_mean(values, clusters) -> dict:
+    """Mean with a standard error that allows for clustering.
+
+    Every selection on one match is priced off the same model fit and settled
+    against the same closing-line move, so bets within a match are not
+    independent draws. Treating them as independent, which is what
+    `closing_line_value` does, understates the standard error by roughly the
+    square root of the number of bets per match. On this data that is a factor
+    of about 1.2 to 1.7 - not enough to overturn a 7-sigma result, but easily
+    enough to manufacture a 2-sigma one, and the whole point of a per-season
+    table is that each row is thin enough for that to matter.
+
+    Uses the standard cluster-robust variance for a mean, with the usual
+    G/(G-1) small-sample correction. When every observation is its own cluster
+    this reduces exactly to the naive `std(ddof=1) / sqrt(n)`, which is what
+    `test_clustered_se_matches_the_naive_se_without_clusters` pins down.
+    """
+    values = np.asarray(values, dtype=float)
+    clusters = np.asarray(clusters)
+    keep = np.isfinite(values)
+    values, clusters = values[keep], clusters[keep]
+    n = len(values)
+    if n == 0:
+        return {"n": 0, "n_clusters": 0, "mean": float("nan"), "se": float("nan")}
+
+    mean = float(values.mean())
+    if n == 1:
+        return {"n": 1, "n_clusters": 1, "mean": mean, "se": float("nan")}
+
+    residuals = values - mean
+    frame = pd.DataFrame({"cluster": clusters, "residual": residuals})
+    group_sums = frame.groupby("cluster")["residual"].sum().to_numpy()
+    groups = len(group_sums)
+    if groups < 2:
+        return {"n": n, "n_clusters": groups, "mean": mean, "se": float("nan")}
+
+    variance = (groups / (groups - 1)) * float((group_sums ** 2).sum()) / (n ** 2)
+    return {
+        "n": n,
+        "n_clusters": groups,
+        "mean": mean,
+        "se": float(np.sqrt(variance)),
+    }
+
+
+def season_breakdown(
+    predictions: pd.DataFrame,
+    market: str | None = None,
+    season: pd.Series | None = None,
+    edge_threshold: float = 0.02,
+    cutover_month: int = 8,
+) -> pd.DataFrame:
+    """Closing line value and probability quality, one row per season.
+
+    A single pooled CLV number assumes the thing being measured held still for
+    the length of the window. That assumption is worth checking rather than
+    making. If CLV is strongly positive in some seasons and negative in
+    others, the pooled figure is an average over regimes that no longer exist,
+    and both the tuning window and the evaluation window are answering a
+    question about a mixture nobody asked about.
+
+    `mean_clv` is measured on selections that cleared `edge_threshold`, so it
+    matches the headline number in `scripts/backtest.py`. Log loss is measured
+    on every priced selection via `score_market`, so the two columns answer
+    different questions on purpose: whether the model's probabilities got
+    worse, and whether the prices it could take got worse. Those can move
+    independently, and which one moved says what changed.
+    """
+    if predictions.empty:
+        return pd.DataFrame()
+
+    frame = predictions.copy().reset_index(drop=True)
+    if market is not None:
+        frame = frame[frame["market"] == market].reset_index(drop=True)
+    if frame.empty:
+        return pd.DataFrame()
+
+    if season is not None:
+        frame["season"] = pd.Series(season).reset_index(drop=True)
+    else:
+        frame["season"] = season_labels(frame["date"], cutover_month)
+
+    rows = []
+    for label, group in frame.groupby("season"):
+        bets = group[
+            group["expected_value"].notna()
+            & (group["expected_value"] >= edge_threshold)
+            & group["clv"].notna()
+        ]
+        clv = clustered_mean(bets["clv"], bets["match_id"]) if not bets.empty else {}
+        # `closing_line_value` uses std(ddof=1), which is undefined on a single
+        # observation. A pooled window never has one bet in it; a per-season
+        # row easily can, in a season the data barely covers.
+        naive = closing_line_value(bets) if len(bets) > 1 else {}
+        if len(bets) == 1:
+            naive = {"beat_close_rate": float(bets["clv"].iloc[0] > 0)}
+
+        row = {
+            "season": int(label),
+            "matches": int(group["match_id"].nunique()),
+            "priced": int(len(group)),
+            "bets": int(clv.get("n", 0)),
+            "mean_clv": clv.get("mean", float("nan")),
+            "se_clustered": clv.get("se", float("nan")),
+            "se_naive": naive.get("clv_standard_error", float("nan")),
+            "beat_close": naive.get("beat_close_rate", float("nan")),
+        }
+        row["z"] = (
+            row["mean_clv"] / row["se_clustered"]
+            if np.isfinite(row.get("se_clustered", np.nan)) and row["se_clustered"] > 0
+            else float("nan")
+        )
+
+        if market is not None:
+            score = score_market(group, market)
+            row["model_log_loss"] = score.get("model_log_loss", float("nan"))
+            row["market_log_loss"] = score.get("market_log_loss", float("nan"))
+            row["log_loss_gap"] = score.get("log_loss_gap", float("nan"))
+        rows.append(row)
+
+    return pd.DataFrame(rows).sort_values("season").reset_index(drop=True)
+
+
+def era_comparison(
+    predictions: pd.DataFrame,
+    split_season: int,
+    market: str | None = None,
+    season: pd.Series | None = None,
+    edge_threshold: float = 0.02,
+    cutover_month: int = 8,
+) -> dict:
+    """Pool seasons either side of one pre-specified split and compare CLV.
+
+    Per-season rows are thin. Pooling into two eras buys back the power, but
+    only if the split point is chosen before looking. Scanning every possible
+    split and reporting the one with the largest gap is the same uncorrected
+    multiple-comparisons error as tuning on five leagues and reporting the
+    best: with six candidate splits, a two-sigma "regime change" is what you
+    should expect to see even when nothing changed.
+
+    So: pick the split from a reason, not from the data. `2021` is defensible
+    because crowds returned for 2021-22 and home advantage is known to have
+    moved while they were absent. If a different split is used, it needs a
+    reason of the same kind, stated first.
+
+    The two eras are disjoint sets of matches, so the clusters do not overlap
+    and the variance of the difference is just the sum of the two variances.
+    """
+    table_input = predictions.copy().reset_index(drop=True)
+    if market is not None:
+        table_input = table_input[table_input["market"] == market].reset_index(drop=True)
+    if table_input.empty:
+        return {"n_before": 0, "n_after": 0}
+
+    if season is not None:
+        table_input["season"] = pd.Series(season).reset_index(drop=True)
+    else:
+        table_input["season"] = season_labels(table_input["date"], cutover_month)
+
+    bets = table_input[
+        table_input["expected_value"].notna()
+        & (table_input["expected_value"] >= edge_threshold)
+        & table_input["clv"].notna()
+    ]
+    before = bets[bets["season"] < split_season]
+    after = bets[bets["season"] >= split_season]
+    if before.empty or after.empty:
+        return {"n_before": len(before), "n_after": len(after)}
+
+    left = clustered_mean(before["clv"], before["match_id"])
+    right = clustered_mean(after["clv"], after["match_id"])
+    difference = right["mean"] - left["mean"]
+    se = float(np.sqrt(left["se"] ** 2 + right["se"] ** 2))
+
+    return {
+        "split_season": int(split_season),
+        "n_before": left["n"], "mean_clv_before": left["mean"], "se_before": left["se"],
+        "n_after": right["n"], "mean_clv_after": right["mean"], "se_after": right["se"],
+        "difference": float(difference),
+        "difference_se": se,
+        "difference_z": float(difference / se) if se > 0 else float("nan"),
+    }
