@@ -60,6 +60,17 @@ def calibration_table(
     Read the `gap` column. Consistently positive means the model is
     underconfident, consistently negative means overconfident, and a sign that
     flips across bands means it is badly shaped rather than merely biased.
+
+    **Do not point this at a two-sided market without picking a side first.**
+    Over and under at one line are exact complements, so feeding both in makes
+    every band a mixture of two different kinds of fixture: the 0.30-0.40 band
+    of a totals market holds the *overs* from defensive fixtures and the
+    *unders* from open ones. The table then reports a sign flip across adjacent
+    bands that is an artifact of that mixing rather than a property of the
+    model, and its `n` column looks twice as informative as it is. Use
+    `calibration_by_line` for those markets; it splits by line and takes one
+    side. This function is right for a market whose selections are not
+    complements of each other.
     """
     probabilities = np.asarray(probabilities, dtype=float)
     outcomes = np.asarray(outcomes, dtype=float)
@@ -598,6 +609,262 @@ def season_breakdown(
         rows.append(row)
 
     return pd.DataFrame(rows).sort_values("season").reset_index(drop=True)
+
+
+# --------------------------------------------------------------------------
+# Distribution shape
+# --------------------------------------------------------------------------
+
+def calibration_by_line(
+    predictions: pd.DataFrame,
+    market: str,
+    side: str,
+    bins: int = 10,
+    min_count: int = 25,
+) -> pd.DataFrame:
+    """Calibration for one side of a market, split by the bookmaker's line.
+
+    Two problems with pooling, and this fixes both.
+
+    **The complement problem.** Over and under at the same line always sum to
+    one, so a pooled table double-counts every match and mixes opposite kinds
+    of fixture into the same probability band. Taking one `side` removes the
+    duplication and the mixing together; the other side carries no independent
+    information, so nothing is lost by dropping it.
+
+    **The line problem.** A handicap at -0.5 and one at -2.0 are different
+    questions, and pooling them hides a model that is fine at one and wrong at
+    the other. Splitting by line asks them separately. For a market the source
+    only ever quotes at a single line this split is a no-op, which is itself
+    worth knowing before inventing an explanation that needs several.
+
+    `gap` is observed frequency minus predicted, and `se` is the standard error
+    of that gap *under the model* - the Poisson-binomial spread of the number
+    of winners, which is the right null for "is this discrepancy real". The
+    existing `calibration_table` leaves that arithmetic to the reader, which is
+    how a 3.5-sigma band and a 1-sigma band end up looking equally alarming.
+    """
+    frame = predictions[predictions["market"] == market]
+    frame = frame[frame["selection"] == side]
+    frame = frame[frame["push_fraction"] < 0.5]
+    if "model_conditional" in frame.columns:
+        frame = frame[frame["model_conditional"].notna()]
+    if frame.empty:
+        return pd.DataFrame()
+
+    probability_column = (
+        "model_conditional" if "model_conditional" in frame.columns
+        else "model_probability"
+    )
+    edges = np.linspace(0.0, 1.0, bins + 1)
+    rows = []
+    for line, group in frame.groupby("line", dropna=False):
+        probabilities = group[probability_column].to_numpy(dtype=float)
+        outcomes = (group["win_fraction"] > 0.5).to_numpy(dtype=float)
+        for low, high in zip(edges[:-1], edges[1:]):
+            mask = (probabilities >= low) & (probabilities < high)
+            n = int(mask.sum())
+            if n < min_count:
+                continue
+            predicted = probabilities[mask]
+            observed = float(outcomes[mask].mean())
+            gap = observed - float(predicted.mean())
+            se = float(np.sqrt((predicted * (1.0 - predicted)).sum())) / n
+            rows.append(
+                {
+                    "line": line,
+                    "band": f"{low:.2f}-{high:.2f}",
+                    "n": n,
+                    "predicted": float(predicted.mean()),
+                    "observed": observed,
+                    "gap": gap,
+                    "se": se,
+                    "z": gap / se if se > 0 else float("nan"),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def calibration_slope(probabilities, outcomes) -> dict:
+    """How much too extreme - or too timid - the probabilities are, as one number.
+
+    Regresses the outcome on the *log-odds* of the model's probability. A
+    perfectly calibrated model gives slope 1 and intercept 0.
+
+    - **slope below 1** means the probabilities are spread too far apart: the
+      model separates fixtures more confidently than the results justify, so
+      the fix is more shrinkage, not a different distribution.
+    - **slope above 1** means the opposite, that it is hedging toward the base
+      rate and could afford to be bolder.
+    - **intercept away from 0** is a plain bias, the same thing a consistently
+      signed `gap` column shows.
+
+    This is worth having next to a calibration table because the table cannot
+    distinguish the two failures by eye. A sign flip across bands looks like
+    "badly shaped" but is the *expected* appearance of a slope below one, and
+    reading it as unfixable shape when it is really excess spread points the
+    next piece of work in the wrong direction.
+
+    Fitted by plain maximum likelihood on the two parameters, with a
+    cluster-free standard error on the slope from the inverse Fisher
+    information. Selections that share a match are not independent, so treat a
+    borderline result here the way `clustered_mean` treats a borderline CLV.
+    """
+    from scipy import optimize
+
+    probabilities = np.clip(np.asarray(probabilities, dtype=float), EPSILON, 1 - EPSILON)
+    outcomes = np.asarray(outcomes, dtype=float)
+    keep = np.isfinite(probabilities) & np.isfinite(outcomes)
+    probabilities, outcomes = probabilities[keep], outcomes[keep]
+    if len(outcomes) < 30 or len(np.unique(outcomes)) < 2:
+        return {"n": int(len(outcomes))}
+
+    logit = np.log(probabilities / (1.0 - probabilities))
+
+    def negative_log_likelihood(theta):
+        intercept, slope = theta
+        eta = intercept + slope * logit
+        # log(1 + exp(eta)) computed stably for large |eta|.
+        log_denominator = np.logaddexp(0.0, eta)
+        return -float(np.sum(outcomes * eta - log_denominator))
+
+    result = optimize.minimize(
+        negative_log_likelihood, x0=np.array([0.0, 1.0]), method="BFGS"
+    )
+    intercept, slope = float(result.x[0]), float(result.x[1])
+
+    eta = intercept + slope * logit
+    fitted = 1.0 / (1.0 + np.exp(-eta))
+    weight = fitted * (1.0 - fitted)
+    design = np.column_stack([np.ones_like(logit), logit])
+    information = design.T @ (design * weight[:, None])
+    try:
+        covariance = np.linalg.inv(information)
+        slope_se = float(np.sqrt(covariance[1, 1]))
+    except np.linalg.LinAlgError:  # pragma: no cover - singular only if logit is constant
+        slope_se = float("nan")
+
+    return {
+        "n": int(len(outcomes)),
+        "intercept": intercept,
+        "slope": slope,
+        "slope_se": slope_se,
+        "slope_z": (slope - 1.0) / slope_se if slope_se > 0 else float("nan"),
+    }
+
+
+def goal_total_fit(match_totals: pd.DataFrame, max_bucket: int = 6) -> dict:
+    """Does the realised spread of match totals match the predicted spread?
+
+    `models/counts.py` uses a negative binomial for corners and cards because a
+    Poisson is too narrow for them: the variance of a real count exceeds its
+    mean, so a Poisson fit is overconfident about the middle and underprices
+    the tails. The goals model never had that reasoning applied to it. This
+    tests it directly, against the fitted distribution rather than against a
+    textbook Poisson, so the answer accounts for the Dixon-Coles correction and
+    for the fact that every match has its own rates.
+
+    Two views, because they fail differently.
+
+    **`dispersion`** is the mean squared Pearson residual, `(observed - mean) /
+    sd`, averaged over matches. A correctly shaped predictive distribution puts
+    it at 1.0. Above 1.0 means realised totals scatter more widely than the
+    model expects, which is the corners-and-cards failure. Note honestly what
+    else inflates it: error in the *fitted rates* also widens the residuals, so
+    a ratio above one is evidence that the predictive distribution is too
+    narrow, not proof that the Poisson assumption specifically is the culprit.
+
+    **`buckets`** is the same question without assuming the failure is
+    symmetric. It compares how often each total actually occurred against how
+    often the model said it would, with a Poisson-binomial standard error for
+    each bucket. Overdispersion shows up here as too few matches in the middle
+    and too many in both tails; a mean that is simply misplaced shows up as a
+    monotone drift instead. The distinction decides whether the fix is a
+    dispersion parameter or a better rate.
+
+    The variance is also split into its two sources, because "the predictive
+    distribution is too wide" has two different causes and two different
+    repairs. `within_match_variance` is how wide each match's own distribution
+    is, and it is a Poisson property that a dispersion parameter would change.
+    `between_match_variance` is how far the fitted rates move from fixture to
+    fixture, and it is a shrinkage property that ridge and the half-life
+    control. Their sum is what should match `observed_variance`.
+    """
+    if match_totals.empty:
+        return {"n": 0}
+
+    pmfs = np.vstack([np.asarray(p, dtype=float) for p in match_totals["total_pmf"]])
+    observed = match_totals["observed_total"].to_numpy(dtype=int)
+    support = np.arange(pmfs.shape[1])
+
+    predicted_mean = pmfs @ support
+    predicted_second = pmfs @ (support ** 2)
+    predicted_variance = predicted_second - predicted_mean ** 2
+
+    usable = predicted_variance > 0
+    residual = (observed[usable] - predicted_mean[usable]) / np.sqrt(
+        predicted_variance[usable]
+    )
+    squared = residual ** 2
+    n = int(len(squared))
+    ratio = float(squared.mean())
+    ratio_se = float(squared.std(ddof=1) / np.sqrt(n)) if n > 1 else float("nan")
+
+    # Law of total variance, so that "the distribution is too wide" can be
+    # attributed. Var(T) = E[Var(T|x)] + Var(E[T|x]): the first term is how
+    # wide each match's own distribution is, the second is how much the fitted
+    # rates move between matches. They call for different repairs - a
+    # dispersion parameter for the first, more shrinkage for the second - so
+    # reporting only their sum would leave the useful part out.
+    within = float(predicted_variance.mean())
+    between = float(predicted_mean.var(ddof=1))
+
+    # Buckets: every total up to max_bucket, then one tail bucket holding the
+    # rest, so the comparison stays well-powered where the data is thin.
+    rows = []
+    for bucket in range(max_bucket + 1):
+        column = pmfs[:, bucket] if bucket < pmfs.shape[1] else np.zeros(len(pmfs))
+        rows.append(
+            _bucket_row(str(bucket), (observed == bucket), column)
+        )
+    tail = pmfs[:, max_bucket + 1:].sum(axis=1)
+    rows.append(_bucket_row(f"{max_bucket + 1}+", (observed > max_bucket), tail))
+
+    return {
+        "n": n,
+        "dispersion": ratio,
+        "dispersion_se": ratio_se,
+        "dispersion_z": (ratio - 1.0) / ratio_se if ratio_se > 0 else float("nan"),
+        "observed_mean": float(observed.mean()),
+        "predicted_mean": float(predicted_mean.mean()),
+        "observed_variance": float(observed.var(ddof=1)),
+        "within_match_variance": within,
+        "between_match_variance": between,
+        "predicted_variance": within + between,
+        "buckets": pd.DataFrame(rows),
+    }
+
+
+def _bucket_row(label: str, hit: np.ndarray, probabilities: np.ndarray) -> dict:
+    """One row of the observed-versus-expected table for a count bucket.
+
+    The count of matches landing in a bucket is a sum of independent Bernoulli
+    draws with *different* probabilities - a Poisson-binomial - so its variance
+    is the sum of p(1-p) rather than n*p_bar*(1-p_bar). Using the latter would
+    overstate the spread and quietly hide real discrepancies.
+    """
+    observed = int(hit.sum())
+    expected = float(probabilities.sum())
+    variance = float((probabilities * (1.0 - probabilities)).sum())
+    se = float(np.sqrt(variance))
+    return {
+        "total": label,
+        "observed": observed,
+        "expected": expected,
+        "difference": observed - expected,
+        "se": se,
+        "z": (observed - expected) / se if se > 0 else float("nan"),
+    }
 
 
 def era_comparison(

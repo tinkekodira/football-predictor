@@ -93,6 +93,12 @@ class BacktestResult:
     refits: int = 0
     matches: int = 0
     notes: list[str] = field(default_factory=list)
+    # One row per match rather than per selection: the model's whole predicted
+    # distribution over the match total, and what the total actually was. Kept
+    # apart from `predictions` because it is a property of the match, not of
+    # any bookmaker's offer, so it exists even for matches nobody priced, and
+    # duplicating it across every selection row would invite double-counting.
+    match_totals: pd.DataFrame = field(default_factory=pd.DataFrame)
 
     @property
     def bets(self) -> pd.DataFrame:
@@ -231,6 +237,7 @@ def run_backtest(con, config: BacktestConfig, verbose: bool = True) -> BacktestR
     odds_by_match = dict(tuple(odds.groupby("match_id"))) if not odds.empty else {}
 
     records: list[dict] = []
+    total_records: list[dict] = []
     notes: list[str] = []
     cursor = config.start
     refits = 0
@@ -259,7 +266,11 @@ def run_backtest(con, config: BacktestConfig, verbose: bool = True) -> BacktestR
         refits += 1
         for row in batch.itertuples():
             matches_seen += 1
-            records += _score_match(row, bundle, odds_by_match.get(row.match_id), config)
+            match_records, total_record = _score_match(
+                row, bundle, odds_by_match.get(row.match_id), config
+            )
+            records += match_records
+            total_records.append(total_record)
 
     predictions = pd.DataFrame(records)
     if verbose:
@@ -270,15 +281,32 @@ def run_backtest(con, config: BacktestConfig, verbose: bool = True) -> BacktestR
     return BacktestResult(
         predictions=predictions, config=config, refits=refits,
         matches=matches_seen, notes=notes,
+        match_totals=pd.DataFrame(total_records),
     )
 
 
-def _score_match(row, bundle, match_odds: pd.DataFrame | None, config) -> list[dict]:
-    """Price and settle every selection the bookmaker offered for one match."""
-    if match_odds is None or match_odds.empty:
-        return []
+def _score_match(row, bundle, match_odds: pd.DataFrame | None, config):
+    """Price and settle every selection the bookmaker offered for one match.
 
+    Returns the selection records alongside one match-level record holding the
+    predicted distribution of the total. The matrix is built before the odds
+    are checked so that the second of those survives a match no bookmaker
+    priced: whether the goals distribution is the right shape is a question
+    about the model, and throwing away matches because nobody quoted them
+    would answer it on a sample selected by the bookmaker.
+    """
     matrix = bundle.goals.score_matrix(row.home_team, row.away_team)
+    total_pmf = markets.total_distribution(matrix)
+    total_record = {
+        "match_id": row.match_id,
+        "date": row.date,
+        "observed_total": int(row.home_goals) + int(row.away_goals),
+        "total_pmf": total_pmf,
+    }
+
+    if match_odds is None or match_odds.empty:
+        return [], total_record
+
     market_probabilities = _market_probabilities(match_odds, config.margin_method)
     records: list[dict] = []
 
@@ -367,7 +395,7 @@ def _score_match(row, bundle, match_odds: pd.DataFrame | None, config) -> list[d
                 "book_prices": _all_book_clv(group, closing_fair),
             }
         )
-    return records
+    return records, total_record
 
 
 def _all_book_clv(group: pd.DataFrame, closing_fair: float) -> dict[str, float]:

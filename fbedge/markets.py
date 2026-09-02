@@ -199,6 +199,27 @@ def expected_total(matrix: np.ndarray) -> float:
     return float((matrix * totals).sum())
 
 
+def total_distribution(matrix: np.ndarray) -> np.ndarray:
+    """The whole distribution of the match total, not just its mean.
+
+    The scoreline matrix holds P(home=i, away=j) and the total is i+j, so this
+    sums the anti-diagonals.
+
+    Worth having separately from `expected_total` because the mean cannot
+    answer the question that matters about shape. `models/counts.py` uses a
+    negative binomial for corners and cards precisely because a Poisson is too
+    narrow and underprices the tails; nobody ever checked whether the same is
+    true of goals. Comparing the spread of realised totals against the spread
+    this distribution predicts is that check, and it needs the full
+    distribution rather than a point estimate.
+    """
+    size = matrix.shape[0]
+    totals = np.add.outer(np.arange(size), np.arange(size))
+    return np.bincount(
+        totals.ravel(), weights=matrix.ravel(), minlength=2 * size - 1
+    )
+
+
 # --------------------------------------------------------------------------
 # Count markets (corners, cards)
 # --------------------------------------------------------------------------
