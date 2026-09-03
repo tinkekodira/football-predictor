@@ -32,7 +32,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from fbedge import config, database, understat  # noqa: E402
+from fbedge import availability, config, database, understat  # noqa: E402
 
 
 def main() -> int:
@@ -122,7 +122,45 @@ def main() -> int:
     con.execute("INSERT INTO match_lineups SELECT * FROM lineups_in")
     con.unregister("lineups_in")
 
+    # Availability is derived here rather than at fit time. It is a rolling
+    # window over each team's earlier matches, so recomputing it inside every
+    # weekly refit of a walk-forward would repeat the same work thousands of
+    # times, and keeping it beside the line-ups puts the point-in-time rule in
+    # one place instead of spreading it across callers.
+    fixture_rows = con.execute(
+        "SELECT match_id, date, home_team, away_team FROM matches WHERE league = ?",
+        [args.league],
+    ).df()
+    features = availability.availability_features(lineups, fixture_rows)
+    wide = availability.attach_to_fixtures(features)
+
+    con.execute("DROP TABLE IF EXISTS match_availability")
+    con.execute(
+        """
+        CREATE TABLE match_availability (
+            match_id                    VARCHAR PRIMARY KEY,
+            missing_share_home          DOUBLE,
+            missing_share_away          DOUBLE,
+            missing_starter_share_home  DOUBLE,
+            missing_starter_share_away  DOUBLE,
+            missing_xgchain_share_home  DOUBLE,
+            missing_xgchain_share_away  DOUBLE
+        )
+        """
+    )
+    keep = [
+        "match_id",
+        "missing_share_home", "missing_share_away",
+        "missing_starter_share_home", "missing_starter_share_away",
+        "missing_xgchain_share_home", "missing_xgchain_share_away",
+    ]
+    con.register("availability_in", wide[keep])
+    con.execute("INSERT INTO match_availability SELECT * FROM availability_in")
+    con.unregister("availability_in")
+
     print(f"\nWrote {len(lineups)} appearances for {lineups['match_id'].nunique()} matches.")
+    usable = int(wide["missing_starter_share_home"].notna().sum())
+    print(f"Wrote {len(wide)} availability rows, {usable} with enough history to use.")
     if failures:
         print(f"{len(failures)} matches failed; first few: {failures[:3]}")
     print(

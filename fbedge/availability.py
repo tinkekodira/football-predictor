@@ -228,3 +228,53 @@ def attach_to_fixtures(features: pd.DataFrame) -> pd.DataFrame:
     away = features[~features["is_home"].astype(bool)].set_index("match_id")[columns]
     joined = home.join(away, lsuffix="_home", rsuffix="_away", how="inner")
     return joined.reset_index()
+
+
+def for_fixture(
+    lineups: pd.DataFrame,
+    matches: pd.DataFrame,
+    home_team: str,
+    away_team: str,
+    as_of,
+    importance_window: int = DEFAULT_IMPORTANCE_WINDOW,
+    absence_window: int = DEFAULT_ABSENCE_WINDOW,
+    min_prior_matches: int = MIN_PRIOR_MATCHES,
+) -> tuple[float, float]:
+    """Availability for a fixture that has not been played yet.
+
+    `availability_features` works over matches that exist in the line-up table,
+    which an upcoming fixture does not. Rather than reimplement the windowing
+    for that case - and risk the two versions drifting apart, with only one of
+    them carrying the point-in-time guarantee - this appends a placeholder
+    entry after the team's last played match and asks the same function for the
+    features at that position. `_features_at` never reads the entry it is
+    describing, so the placeholder being empty is precisely the point.
+
+    Returns (home, away) missing starter shares, using 0.0 where there is not
+    enough history. Zero is the right filler here for the same reason as in the
+    backtest: the fitted effect multiplies a share, so zero means no adjustment
+    rather than a claim that everyone is fit.
+    """
+    view = team_match_view(lineups, matches)
+    if view.empty:
+        return 0.0, 0.0
+    cutoff = pd.Timestamp(as_of)
+
+    shares = []
+    for team in (home_team, away_team):
+        block = view[(view["team"] == team) & (view["date"] < cutoff)]
+        if block.empty:
+            shares.append(0.0)
+            continue
+        ordered = _squads_in_order(block)
+        ordered.append(
+            {"match_id": None, "is_home": team == home_team,
+             "minutes": {}, "chain": {}, "starters": set()}
+        )
+        features = _features_at(
+            ordered, len(ordered) - 1, team,
+            importance_window, absence_window, min_prior_matches,
+        )
+        value = features["missing_starter_share"]
+        shares.append(0.0 if value != value else float(value))
+    return shares[0], shares[1]

@@ -107,6 +107,11 @@ class GoalsModel:
     # that differ only in this are otherwise indistinguishable downstream and
     # the whole point of the comparison is telling them apart.
     target: str = "goals"
+    # How much a side's rate moves per unit of missing availability: the first
+    # entry is the effect of its own absentees, the second of its opponent's.
+    # (0.0, 0.0) means the model was fitted without availability and `rates`
+    # then ignores whatever it is passed, so callers need not know either way.
+    availability_beta: tuple[float, float] = (0.0, 0.0)
 
     # ----------------------------------------------------------------
     # Prediction
@@ -118,12 +123,23 @@ class GoalsModel:
         except ValueError:
             return None
 
-    def rates(self, home_team: str, away_team: str) -> tuple[float, float]:
+    def rates(
+        self,
+        home_team: str,
+        away_team: str,
+        missing_home: float = 0.0,
+        missing_away: float = 0.0,
+    ) -> tuple[float, float]:
         """Expected goals for each side.
 
         A team the model has never seen is given the promoted-team prior
         rather than an error: that is the honest answer for a club that has
         just come up, and the caller is told about it through `is_known`.
+
+        `missing_home` and `missing_away` are availability shares from
+        `fbedge.availability`, which reads only matches played earlier. They do
+        nothing unless the model was fitted with `use_availability=True`, and
+        default to zero so that every existing caller keeps its behaviour.
         """
         home_pos = self._position(home_team)
         away_pos = self._position(away_team)
@@ -133,8 +149,14 @@ class GoalsModel:
         away_attack = self.attack[away_pos] if away_pos is not None else base.PROMOTED_ATTACK_PRIOR
         away_defence = self.defence[away_pos] if away_pos is not None else base.PROMOTED_DEFENCE_PRIOR
 
-        lam = np.exp(self.intercept + self.home_advantage + home_attack - away_defence)
-        mu = np.exp(self.intercept + away_attack - home_defence)
+        own, opp = self.availability_beta
+        home_shift = own * float(missing_home) + opp * float(missing_away)
+        away_shift = own * float(missing_away) + opp * float(missing_home)
+
+        lam = np.exp(
+            self.intercept + self.home_advantage + home_attack - away_defence + home_shift
+        )
+        mu = np.exp(self.intercept + away_attack - home_defence + away_shift)
         return float(lam), float(mu)
 
     def is_known(self, team: str) -> bool:
@@ -145,14 +167,15 @@ class GoalsModel:
         return int(self.match_counts[position]) if position is not None else 0
 
     def score_matrix(
-        self, home_team: str, away_team: str, max_goals: int = 12
+        self, home_team: str, away_team: str, max_goals: int = 12,
+        missing_home: float = 0.0, missing_away: float = 0.0,
     ) -> np.ndarray:
         """Probability of every scoreline from 0-0 up to max_goals each.
 
         Truncating at 12 discards well under a thousandth of the mass; the
         matrix is renormalised so the probabilities still sum to one.
         """
-        lam, mu = self.rates(home_team, away_team)
+        lam, mu = self.rates(home_team, away_team, missing_home, missing_away)
         return score_matrix_from_rates(lam, mu, self.rho, max_goals=max_goals)
 
     def ratings(self) -> pd.DataFrame:
@@ -404,6 +427,94 @@ def recalibrate_on_goals(
     return float(result.x[0]), float(result.x[1]), rho
 
 
+AVAILABILITY_COLUMNS = ("missing_starter_share_home", "missing_starter_share_away")
+
+# The effect of absence is bounded well inside anything plausible. Losing a
+# whole first eleven is a share of 1.0, so a coefficient of -2 would be a 17%
+# cut in the scoring rate for one missing regular; nothing real is larger, and
+# a fit that wants to go further has found noise or a broken join.
+AVAILABILITY_BOUNDS = (-2.0, 2.0)
+
+
+def fit_availability_effect(
+    training: TrainingSet,
+    attack: np.ndarray,
+    defence: np.ndarray,
+    intercept: float,
+    home_advantage: float,
+    rho: float,
+    columns: tuple[str, str] = AVAILABILITY_COLUMNS,
+) -> tuple[float, float]:
+    """How much a side's rate moves when players are missing.
+
+    Fitted as a second stage with the team strengths held fixed, the same shape
+    as `recalibrate_on_goals` and for the same reason: the strengths are
+    already shrunk and re-penalising them here would let two parameters trade
+    against twenty. Only two numbers are free, so a plain bounded optimiser is
+    enough and no gradient is needed.
+
+    `own` is the effect of a team's own absentees on its scoring rate and
+    should come out negative; `opp` is the effect of its opponent's, and should
+    come out positive, since a weakened defence concedes more. Both are on the
+    log-rate scale, so multiply by a share of about one eleventh to read either
+    as "the effect of one regular starter being out".
+
+    Matches with no availability figure - early in a team's history, or before
+    `scripts/build_rosters.py` was run - are dropped rather than filled with
+    zero, since zero means "everyone fit" and would be a claim, not a gap.
+
+    **How well it recovers a known effect.** Measured on synthetic leagues with
+    the effect planted, `own` comes back essentially unbiased - a planted -0.60
+    recovers as -0.65, -0.59 and -0.48 at 240, 720 and 2400 matches - but with
+    a standard deviation near 0.09 even at 2400. Single-season estimates are
+    therefore close to worthless and only a full history says anything. `opp`
+    is the weaker of the two and runs high, recovering +0.40 to +0.55 from a
+    planted +0.30, because the team-strength stage absorbs some of the
+    structure it would otherwise pick up. Trust `own`; treat `opp` as
+    directional.
+    """
+    frame = training.frame
+    home_col, away_col = columns
+    if home_col not in frame.columns or away_col not in frame.columns:
+        return 0.0, 0.0
+
+    usable = frame[home_col].notna() & frame[away_col].notna()
+    if usable.sum() < 50:
+        return 0.0, 0.0
+
+    subset = training.subset(usable)
+    frame = subset.frame
+    x = frame["home_goals"].to_numpy(dtype=float)
+    y = frame["away_goals"].to_numpy(dtype=float)
+    weights = subset.weights
+    miss_home = frame[home_col].to_numpy(dtype=float)
+    miss_away = frame[away_col].to_numpy(dtype=float)
+
+    base_home = (
+        intercept + home_advantage
+        + attack[subset.home_idx] - defence[subset.away_idx]
+    )
+    base_away = intercept + attack[subset.away_idx] - defence[subset.home_idx]
+
+    def negative_log_likelihood(theta: np.ndarray) -> float:
+        own, opp = float(theta[0]), float(theta[1])
+        eta_home = np.clip(base_home + own * miss_home + opp * miss_away, -8.0, 3.0)
+        eta_away = np.clip(base_away + own * miss_away + opp * miss_home, -8.0, 3.0)
+        lam, mu = np.exp(eta_home), np.exp(eta_away)
+        log_lik = weights * (x * eta_home - lam + y * eta_away - mu)
+        correction, _, _, _ = tau(x, y, lam, mu, rho)
+        log_lik = log_lik + weights * np.log(correction)
+        return -float(log_lik.sum())
+
+    from scipy import optimize
+
+    result = optimize.minimize(
+        negative_log_likelihood, np.zeros(2), method="L-BFGS-B",
+        bounds=[AVAILABILITY_BOUNDS, AVAILABILITY_BOUNDS],
+    )
+    return float(result.x[0]), float(result.x[1])
+
+
 def fit_goals_model(
     training: TrainingSet,
     ridge: float | None = None,
@@ -411,6 +522,7 @@ def fit_goals_model(
     use_dixon_coles_correction: bool = True,
     target: str | None = None,
     blend_weight: float = base.DEFAULT_BLEND_WEIGHT,
+    use_availability: bool = False,
 ) -> GoalsModel:
     """Fit by weighted, penalised maximum likelihood.
 
@@ -489,6 +601,12 @@ def fit_goals_model(
             training, attack, defence, use_dixon_coles_correction
         )
 
+    availability_beta = (0.0, 0.0)
+    if use_availability:
+        availability_beta = fit_availability_effect(
+            training, attack, defence, intercept, home_advantage, rho
+        )
+
     return GoalsModel(
         league=training.league,
         as_of=training.as_of,
@@ -505,4 +623,5 @@ def fit_goals_model(
         effective_n=training.effective_n,
         converged=bool(result.success),
         match_counts=training.match_counts(),
+        availability_beta=availability_beta,
     )

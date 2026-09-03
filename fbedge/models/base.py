@@ -203,14 +203,32 @@ def load_training_set(
         xg_select = "x.home_xg, x.away_xg"
         xg_join = "LEFT JOIN match_xg x USING (match_id)"
 
+    # Availability joins the same optional way. It is precomputed by
+    # scripts/build_rosters.py rather than derived here, because it is a
+    # rolling window over each team's earlier matches and a walk-forward refits
+    # thousands of times; deriving it per fit would redo identical work.
+    availability_select = (
+        "NULL AS missing_starter_share_home, NULL AS missing_starter_share_away, "
+        "NULL AS missing_xgchain_share_home, NULL AS missing_xgchain_share_away"
+    )
+    availability_join = ""
+    if _has_table(con, "match_availability"):
+        availability_select = (
+            "a.missing_starter_share_home, a.missing_starter_share_away, "
+            "a.missing_xgchain_share_home, a.missing_xgchain_share_away"
+        )
+        availability_join = "LEFT JOIN match_availability a USING (match_id)"
+
     sql = f"""
         SELECT m.match_id, m.date, m.home_team, m.away_team, m.referee,
                m.home_goals, m.away_goals, m.home_corners, m.away_corners,
                m.home_yellows, m.away_yellows, m.home_reds, m.away_reds,
                m.home_shots, m.away_shots, m.home_sot, m.away_sot,
-               {xg_select}
+               {xg_select},
+               {availability_select}
         FROM matches m
         {xg_join}
+        {availability_join}
         WHERE m.league = ? AND m.date < ?
     """
     params: list = [league, as_of]

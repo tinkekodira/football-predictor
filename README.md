@@ -150,7 +150,7 @@ scripts/
   season_breakdown.py  CLV by season, with a benchmark-change warning
   goals_shape.py       is the goals distribution the right shape
 app.py                 the Streamlit web app
-tests/                 280 tests, run with: python -m pytest
+tests/                 291 tests, run with: python -m pytest
 ```
 
 Four design decisions worth knowing about:

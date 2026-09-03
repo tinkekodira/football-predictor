@@ -111,6 +111,10 @@ class BacktestConfig:
     # has no xG. Naming a target explicitly makes it a hard requirement.
     target: str | None = None
     blend_weight: float = base.DEFAULT_BLEND_WEIGHT
+    # Whether the goals model gets a two-parameter availability adjustment.
+    # Off by default until it earns a place the way the blend did: measured on
+    # leagues that had no part in choosing it. Needs scripts/build_rosters.py.
+    use_availability: bool = False
 
 
 @dataclass
@@ -141,14 +145,23 @@ class BacktestResult:
 
 
 def _load_fixtures(con, league: str, start: dt.date, end: dt.date) -> pd.DataFrame:
+    joined, columns = "", "NULL AS missing_home, NULL AS missing_away"
+    if base._has_table(con, "match_availability"):
+        joined = "LEFT JOIN match_availability a USING (match_id)"
+        columns = (
+            "a.missing_starter_share_home AS missing_home, "
+            "a.missing_starter_share_away AS missing_away"
+        )
     frame = con.execute(
-        """
-        SELECT match_id, date, home_team, away_team, referee,
-               home_goals, away_goals, total_corners, total_cards
-        FROM matches
-        WHERE league = ? AND date >= ? AND date <= ?
-          AND home_goals IS NOT NULL
-        ORDER BY date
+        f"""
+        SELECT m.match_id, m.date, m.home_team, m.away_team, m.referee,
+               m.home_goals, m.away_goals, m.total_corners, m.total_cards,
+               {columns}
+        FROM matches m
+        {joined}
+        WHERE m.league = ? AND m.date >= ? AND m.date <= ?
+          AND m.home_goals IS NOT NULL
+        ORDER BY m.date
         """,
         [league, start, end],
     ).df()
@@ -302,6 +315,7 @@ def run_backtest(con, config: BacktestConfig, verbose: bool = True) -> BacktestR
                     half_life_days=config.half_life_days, ridge=config.ridge,
                     use_cache=False, fit_counts=config.fit_count_models,
                     target=config.target, blend_weight=config.blend_weight,
+                    use_availability=config.use_availability,
                 )
         except base.InsufficientData as exc:
             notes.append(f"{as_of}: skipped, {exc}")
@@ -329,6 +343,20 @@ def run_backtest(con, config: BacktestConfig, verbose: bool = True) -> BacktestR
     )
 
 
+def _availability_or_zero(value) -> float:
+    """A missing availability figure contributes nothing to the rate.
+
+    Zero is safe here only because the fitted effect multiplies a *share*: a
+    share of zero means no adjustment, not a claim that the squad is intact.
+    `pd.isna` rather than the usual `value != value`, because a NULL column
+    arrives as `pd.NA`, whose inequality is itself NA and raises when a bool is
+    taken of it.
+    """
+    if value is None or pd.isna(value):
+        return 0.0
+    return float(value)
+
+
 def _score_match(row, bundle, match_odds: pd.DataFrame | None, config):
     """Price and settle every selection the bookmaker offered for one match.
 
@@ -339,13 +367,24 @@ def _score_match(row, bundle, match_odds: pd.DataFrame | None, config):
     about the model, and throwing away matches because nobody quoted them
     would answer it on a sample selected by the bookmaker.
     """
-    matrix = bundle.goals.score_matrix(row.home_team, row.away_team)
+    # A missing availability figure means "not known", which is different from
+    # "everybody fit". Passing zero is the honest reading only because the
+    # fitted effect is applied to a share, so zero share means no adjustment
+    # rather than a claim that the squad is intact.
+    missing_home = _availability_or_zero(getattr(row, "missing_home", None))
+    missing_away = _availability_or_zero(getattr(row, "missing_away", None))
+    matrix = bundle.goals.score_matrix(
+        row.home_team, row.away_team,
+        missing_home=missing_home, missing_away=missing_away,
+    )
     total_pmf = markets.total_distribution(matrix)
     # The two fitted rates as well as the distribution they generate. Anything
     # asking "did this team score more or less than the model expected" needs
     # the per-side expectation, and recomputing it later would mean refitting
     # the whole walk-forward to recover a number already in hand here.
-    home_rate, away_rate = bundle.goals.rates(row.home_team, row.away_team)
+    home_rate, away_rate = bundle.goals.rates(
+        row.home_team, row.away_team, missing_home, missing_away
+    )
     total_record = {
         "match_id": row.match_id,
         "date": row.date,

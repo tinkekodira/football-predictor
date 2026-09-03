@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
+from . import availability as availability_mod
 from . import markets
 from .models import base, counts, goals
 
@@ -155,6 +156,7 @@ def build_models(
     fit_counts: bool = True,
     target: str | None = None,
     blend_weight: float = base.DEFAULT_BLEND_WEIGHT,
+    use_availability: bool = False,
 ) -> ModelBundle:
     """Fit goals, corners and cards models for one league.
 
@@ -167,7 +169,7 @@ def build_models(
     """
     key = (
         league, as_of, half_life_days, ridge, fit_counts, target, blend_weight,
-        _fingerprint(con, league),
+        use_availability, _fingerprint(con, league),
     )
     if use_cache and key in _MODEL_CACHE:
         return _MODEL_CACHE[key]
@@ -177,6 +179,7 @@ def build_models(
     goals_model = goals.fit_goals_model(
         training, ridge=ridge, half_life_days=half_life_days,
         target=target, blend_weight=blend_weight,
+        use_availability=use_availability,
     )
     # `fit_goals_model` downgrades an unspecified target when the database has
     # no xG. It is silent about it by design - it has no idea whether the
@@ -236,6 +239,22 @@ def _infer_league(con, home_team: str, away_team: str, as_of: dt.date) -> str | 
     return row[0] if row else None
 
 
+def _fixture_availability(con, league, home_team, away_team, as_of):
+    """Missing-starter shares for a fixture, or zeros when unavailable."""
+    if not base._has_table(con, "match_lineups"):
+        return 0.0, 0.0
+    lineups = con.execute("SELECT * FROM match_lineups").df()
+    matches = con.execute(
+        "SELECT match_id, date, home_team, away_team FROM matches WHERE league = ?",
+        [league],
+    ).df()
+    if lineups.empty or matches.empty:
+        return 0.0, 0.0
+    return availability_mod.for_fixture(
+        lineups, matches, home_team, away_team, as_of
+    )
+
+
 def predict_fixture(
     con,
     home_team: str,
@@ -248,6 +267,7 @@ def predict_fixture(
     max_goals: int = 12,
     target: str | None = None,
     blend_weight: float = base.DEFAULT_BLEND_WEIGHT,
+    use_availability: bool = False,
 ) -> FixturePrediction:
     """Price every market for one fixture.
 
@@ -273,6 +293,7 @@ def predict_fixture(
     bundle = build_models(
         con, league, as_of, half_life_days=half_life_days, ridge=ridge,
         target=target, blend_weight=blend_weight,
+        use_availability=use_availability,
     )
     notes = list(bundle.notes)
 
@@ -288,8 +309,23 @@ def predict_fixture(
                 "history, so its rating is mostly the prior, not its own results."
             )
 
-    matrix = bundle.goals.score_matrix(home_team, away_team, max_goals=max_goals)
-    expected_goals = bundle.goals.rates(home_team, away_team)
+    # An upcoming fixture has no row in `match_availability` - it has not been
+    # played - so its availability is derived from the two sides' earlier
+    # matches here. Only done when asked for, because it reads the whole
+    # line-up table and most callers do not need it.
+    missing_home, missing_away = 0.0, 0.0
+    if use_availability:
+        missing_home, missing_away = _fixture_availability(
+            con, league, home_team, away_team, as_of
+        )
+
+    matrix = bundle.goals.score_matrix(
+        home_team, away_team, max_goals=max_goals,
+        missing_home=missing_home, missing_away=missing_away,
+    )
+    expected_goals = bundle.goals.rates(
+        home_team, away_team, missing_home, missing_away
+    )
 
     selections: list[markets.Selection] = []
     selections += markets.match_odds(matrix)

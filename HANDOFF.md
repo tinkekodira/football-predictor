@@ -17,7 +17,7 @@ gambling-adjacent, and nobody should stake real money on it.
 
 ## Current status
 
-- 270 tests passing (`python -m pytest`). Was 205 at the start of the day.
+- 288 tests passing (`python -m pytest`). Was 205 at the start of the day.
 - **The CLV measurement was broken, and is now fixed and re-baselined.** A
   benchmark change in 2024 plus favourite-longshot bias in multiplicative
   margin removal inflated every historical CLV figure. `margin_method` now
@@ -31,6 +31,10 @@ gambling-adjacent, and nobody should stake real money on it.
   fitted to a goals/xG blend with per-target shrinkage. Validated on four
   leagues that had no part in choosing it (-0.0033 log loss, 4/4). Every
   number recorded before that describes the old model.
+- **Player availability was built, measured and left switched off.** Both
+  coefficients carry the predicted sign in all six specifications and none
+  reaches two standard errors; turning it on moves log loss by 0.00004. See the
+  availability section for what that does and does not rule out.
 - Phase 3 backtest and hyperparameter tuner have both been run against real
   data on the Premier League.
 - **No demonstrated edge**, and the current era is measurably *negative*. See
@@ -387,7 +391,76 @@ beatable.
 
 ---
 
-## What was added in the xG session (most recent)
+## What was added in the availability session (most recent)
+
+Player availability from Understat line-ups, built, measured, and **left
+switched off**, because it does not earn its place.
+
+- `fbedge/availability.py` - three availability features, all computed from
+  matches played strictly earlier, plus `for_fixture` for a match not yet
+  played.
+- `fbedge/understat.py` - `fetch_match` and `roster_frame`.
+- `scripts/build_rosters.py` - resumable backfill into `match_lineups` and
+  `match_availability`. 3,430 E0 matches, 98,515 appearances, ~45 min once.
+- `fbedge/models/goals.py` - `fit_availability_effect` and
+  `GoalsModel.availability_beta`, applied by `rates`.
+- `scripts/availability_signal.py` - the measurement.
+- 21 tests in `tests/test_availability.py`.
+
+### The result: a consistent, well-behaved null
+
+Poisson regression with the model's own fitted rate as an offset, so the
+coefficients read directly as "what one missing regular does to the scoring
+rate". E0, 2018-08 onward, 2,976 matches, bootstrapped by match:
+
+| feature | window | beta_own | z | beta_opp | z | detectable at 2 SE |
+|---|---|---|---|---|---|---|
+| missing_starter_share | 2 | -0.102 | -0.66 | +0.164 | 1.20 | 2.86% |
+| missing_xgchain_share | 2 | -0.094 | -0.86 | +0.164 | 1.53 | 2.00% |
+| missing_share | 2 | -0.119 | -0.98 | +0.116 | 1.09 | 2.24% |
+| missing_share | 1 | -0.013 | -0.11 | +0.165 | 1.58 | 2.08% |
+
+**Both coefficients carry the predicted sign in every specification** - a side
+missing players scores less, its opponent scores more - and not one of them
+reaches two standard errors. The implied effects are around 1% on the scoring
+rate per missing regular, against a study that could only resolve 2 to 2.9%.
+
+The model-level test agrees. Backtesting E0 with the adjustment on and off:
+
+```
+use_availability=False   log loss 0.56611   gap +0.00703   CLV -0.0057
+use_availability=True    log loss 0.56615   gap +0.00708   CLV -0.0061
+```
+
+A difference of 0.00004, which is nothing. Compare the blend and shrinkage
+change, worth 0.0033. **`use_availability` therefore defaults to False.**
+
+### What this does and does not rule out
+
+It rules out an effect larger than about 2%. It says nothing about a 1% one,
+and the consistent signs are weak evidence that a small real effect is there.
+
+Two reasons not to read this as "team news does not matter":
+
+- **The proxy cannot tell an injury from a substitute who was not used.**
+  Understat lists only players who appeared, so a fit player left on the bench
+  and a player in a hospital look identical. Roughly a third of team-matches
+  show nobody newly missing, which is already implausible.
+- **Confirmed line-ups are not available when the bet is placed.** They appear
+  about an hour before kick-off, after the opening price and at or after the
+  close. `fbedge/availability.py` is built around never reading them, and that
+  restriction is the honest one; it is also why this can only ever be a proxy
+  for what a real injury feed would say.
+
+**If it is worth pursuing, the cheap next step is the other four leagues.**
+16,000 matches instead of 3,000 would take the detectable effect to about 1.2%,
+which is where the point estimates sit. That is roughly 2.7 hours of polite
+requests and no new code - `build_rosters.py` takes `--league`. Do that before
+considering a paid injury feed, and do not turn the flag on until something
+clears the bar the blend cleared: better on leagues that had no part in
+choosing it.
+
+## What was added in the xG session
 
 The first genuinely new *capability* in a while, rather than a correction to an
 existing one: expected goals from Understat, and the option to fit team
@@ -706,6 +779,10 @@ this document is now on one scale.
 
 What remains, honestly assessed:
 
+0. **The other four leagues for availability**, if that thread is worth
+   pulling: 16,000 matches instead of 3,000 takes the detectable effect from
+   about 2.5% to about 1.2%, which is where the point estimates sit. No new
+   code, roughly 2.7 hours of polite requests.
 1. **Why 2023.** The decline from ≈0% to ≈−2% survives the benchmark fix, is
    three seasons deep (−3.1, −3.7, −4.9 SE), and 2023 carries no Betfair data
    so it is not the instrument. Worth understanding whether it is the market or
