@@ -341,10 +341,19 @@ def _score_match(row, bundle, match_odds: pd.DataFrame | None, config):
     """
     matrix = bundle.goals.score_matrix(row.home_team, row.away_team)
     total_pmf = markets.total_distribution(matrix)
+    # The two fitted rates as well as the distribution they generate. Anything
+    # asking "did this team score more or less than the model expected" needs
+    # the per-side expectation, and recomputing it later would mean refitting
+    # the whole walk-forward to recover a number already in hand here.
+    home_rate, away_rate = bundle.goals.rates(row.home_team, row.away_team)
     total_record = {
         "match_id": row.match_id,
         "date": row.date,
         "observed_total": int(row.home_goals) + int(row.away_goals),
+        "observed_home": int(row.home_goals),
+        "observed_away": int(row.away_goals),
+        "model_home_rate": home_rate,
+        "model_away_rate": away_rate,
         "total_pmf": total_pmf,
     }
 

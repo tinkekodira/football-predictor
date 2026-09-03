@@ -133,7 +133,8 @@ fbedge/
   settlement.py  what a bet actually returned, quarter lines included
   backtest.py    walk-forward: refit, price the book's lines, settle
   evaluation.py  calibration, closing line value, staking, bootstrap
-  understat.py   expected goals: fetch, cache, team-name mapping
+  understat.py   expected goals and rosters: fetch, cache, name mapping
+  availability.py who is missing, from strictly earlier matches only
 scripts/
   build_database.py    one command: download, normalise, load, verify
   make_sample_data.py  synthetic CSVs for offline work and tests
@@ -142,11 +143,14 @@ scripts/
   backtest.py          walk-forward backtest with a full report
   tune_hyperparameters.py  grid search with a held-out window
   build_xg.py          download Understat xG and attach it to matches
+  build_rosters.py     download per-match line-ups into match_lineups
+  availability_signal.py  does knowing who is missing predict anything
+  validate_setting.py  one candidate setting against the shipping default
   compare_targets.py   goals vs xG vs blend, scored on the same matches
   season_breakdown.py  CLV by season, with a benchmark-change warning
   goals_shape.py       is the goals distribution the right shape
 app.py                 the Streamlit web app
-tests/                 266 tests, run with: python -m pytest
+tests/                 280 tests, run with: python -m pytest
 ```
 
 Four design decisions worth knowing about:

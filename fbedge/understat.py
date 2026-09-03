@@ -276,3 +276,107 @@ def season_range(first: int = 2017, last: int | None = None) -> list[int]:
         today = dt.date.today()
         last = today.year if today.month >= 8 else today.year - 1
     return list(range(max(first, FIRST_SEASON), last + 1))
+
+
+# --------------------------------------------------------------------------
+# Per-match rosters
+# --------------------------------------------------------------------------
+#
+# **Read this before using anything below.**
+#
+# `getMatchData/<id>` returns who actually played, with minutes. That is
+# after-the-fact information: confirmed line-ups are published around an hour
+# before kick-off, which is long after the opening price this project bets into
+# and at or after the closing line it measures against. Feeding "who played"
+# into a model that prices a match would be lookahead bias, and because
+# availability genuinely matters it would not look like a bug - it would look
+# like a large and convincing edge.
+#
+# So nothing here may be used as a feature of the match it describes. It is
+# raw material for features about *earlier* matches: who was missing last week,
+# who is a booking away from a ban. `fbedge/availability.py` builds those and
+# is where the point-in-time rule is enforced and tested.
+
+MATCH_CACHE_DIRNAME = "matches"
+
+
+def fetch_match(
+    understat_id: str,
+    cache_dir: Path,
+    force: bool = False,
+    pause: float = 0.6,
+) -> dict:
+    """One match's roster and shot data, from cache when possible.
+
+    Cached one file per match rather than one per season, because a backfill is
+    thousands of requests against somebody else's free service and will be
+    interrupted. Per-match files make a resumed run skip everything already
+    fetched instead of starting the season again.
+    """
+    cache_dir = Path(cache_dir) / MATCH_CACHE_DIRNAME
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    path = cache_dir / f"{understat_id}.json"
+    if path.exists() and not force:
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    url = f"{BASE_URL}/getMatchData/{understat_id}"
+    request = urllib.request.Request(url, headers=_HEADERS)
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            raw = response.read()
+            if response.headers.get("Content-Encoding") == "gzip":
+                raw = gzip.decompress(raw)
+    except urllib.error.HTTPError as exc:
+        raise UnderstatError(f"{url} returned HTTP {exc.code}") from exc
+    except urllib.error.URLError as exc:
+        raise UnderstatError(f"{url} could not be reached: {exc.reason}") from exc
+
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise UnderstatError(f"{url} did not return JSON.") from exc
+    if "rosters" not in payload:
+        raise UnderstatError(f"{url} returned JSON without 'rosters'.")
+
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    time.sleep(pause)
+    return payload
+
+
+def roster_frame(payload: dict, match_id: str) -> pd.DataFrame:
+    """One row per player who appeared, for one match.
+
+    `started` comes from the position label rather than from minutes: Understat
+    writes a real position for a player in the starting eleven and the literal
+    string "Sub" for anyone who came on. Minutes cannot stand in for it, since
+    a starter withdrawn after twenty minutes and a substitute who played
+    seventy are not distinguished by time alone.
+    """
+    rows = []
+    for side, entries in payload.get("rosters", {}).items():
+        for entry in entries.values():
+            position = entry.get("position") or ""
+            rows.append(
+                {
+                    "match_id": match_id,
+                    "is_home": side == "h",
+                    "player_id": str(entry.get("player_id")),
+                    "player": _unescape(entry.get("player") or ""),
+                    "position": position,
+                    "started": position != "Sub",
+                    "minutes": _to_int(entry.get("time")) or 0,
+                    "yellow_card": _to_int(entry.get("yellow_card")) or 0,
+                    "red_card": _to_int(entry.get("red_card")) or 0,
+                    "xg": _to_float(entry.get("xG")),
+                    "xa": _to_float(entry.get("xA")),
+                    "xgchain": _to_float(entry.get("xGChain")),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def _unescape(name: str) -> str:
+    """Understat HTML-escapes apostrophes: "Dara O&#039;Shea"."""
+    import html
+
+    return html.unescape(name)
