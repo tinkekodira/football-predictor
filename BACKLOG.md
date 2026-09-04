@@ -122,6 +122,18 @@ Confirmed line-ups arrive about an hour before kick-off, which is after the
 price the bet is struck at, so even a perfect version of this feature cannot
 use them. `fbedge/availability.py` is built around that constraint.
 
+**Retested, and the null may not survive.** See the retest section of
+HANDOFF.md: with real injuries, *newly* absent players are worth about -7% on
+the scoring rate each on one season of E0, while the count of everyone
+currently out is worth nothing. Needs 2022-2023 and the other four leagues -
+fourteen free requests - before it is a result.
+
+**A source now exists for the first of those.** `fbedge/injuries.py` reads
+API-Football, which states a reason per player per fixture ("Ankle Injury"),
+and a **free** key covers 2022 to 2024 - the same era the availability study
+used. That makes the null retestable with real injuries instead of a rotation-
+contaminated proxy, at no cost. It is the cheapest open question in this file.
+
 ## B7. The count models cannot be validated against any market
 
 **Severity: structural — no code fix exists.**
