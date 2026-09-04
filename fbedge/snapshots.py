@@ -631,6 +631,75 @@ def reconcile(con, tolerance_days: int | None = None) -> dict:
     }
 
 
+def export(con, directory: Path | None = None) -> dict:
+    """Mirror the archive to tracked CSV files.
+
+    **This is the backup, and it is the point.** Everything else in the
+    database rebuilds from static files in two minutes, which is why the
+    database itself is not tracked. This table does not rebuild from anything:
+    the source overwrote the file it came from the moment it published the next
+    one. An irreplaceable asset living only in an untracked binary is one
+    disk failure away from never having existed.
+
+    Written whole rather than appended, and sorted deterministically, so that a
+    commit diff shows the week's new prices and no reordering noise.
+    """
+    target = Path(directory) if directory else config.SNAPSHOT_EXPORT_DIR
+    target.mkdir(parents=True, exist_ok=True)
+    if not _has_table(con, SNAPSHOT_TABLE):
+        return {"fixtures": 0, "prices": 0, "directory": target}
+
+    fixtures = con.execute(
+        f"SELECT * FROM {SNAPSHOT_TABLE} ORDER BY fixture_date, fixture_key, "
+        "first_pulled_at_utc, content_hash"
+    ).df()
+    prices = con.execute(
+        f"""
+        SELECT o.* FROM {SNAPSHOT_ODDS_TABLE} o
+        JOIN {SNAPSHOT_TABLE} f USING (content_hash)
+        ORDER BY f.fixture_date, f.fixture_key, o.content_hash, o.bookmaker,
+                 o.phase, o.market, o.selection, o.line
+        """
+    ).df()
+    fixtures.to_csv(target / "fixture_snapshots.csv", index=False)
+    prices.to_csv(target / "snapshot_odds.csv", index=False)
+    return {
+        "fixtures": int(len(fixtures)),
+        "prices": int(len(prices)),
+        "directory": target,
+    }
+
+
+def import_export(con, directory: Path | None = None) -> dict:
+    """Load a CSV mirror back into an empty database.
+
+    The other half of `export`, and the half that makes it a backup rather than
+    a gesture. A fresh clone rebuilds every other table from the season files;
+    this is how it gets the archive, which nothing else can supply.
+
+    Uses the same content-hash dedupe as a live pull, so importing over an
+    existing archive merges rather than duplicating.
+    """
+    source = Path(directory) if directory else config.SNAPSHOT_EXPORT_DIR
+    fixtures_path = source / "fixture_snapshots.csv"
+    prices_path = source / "snapshot_odds.csv"
+    if not fixtures_path.exists():
+        return {"fixtures_seen": 0, "new_snapshots": 0, "repeat_snapshots": 0,
+                "new_odds_rows": 0}
+    fixtures = pd.read_csv(fixtures_path)
+    prices = (
+        pd.read_csv(prices_path) if prices_path.exists()
+        else pd.DataFrame(columns=["content_hash", "bookmaker", "phase",
+                                   "market", "selection", "line", "price"])
+    )
+    for column in ("fixture_date",):
+        fixtures[column] = pd.to_datetime(fixtures[column]).dt.date
+    for column in ("nominal_collected_at", "first_pulled_at_utc",
+                   "last_pulled_at_utc"):
+        fixtures[column] = pd.to_datetime(fixtures[column])
+    return write_snapshot(con, fixtures, prices)
+
+
 def coverage(con) -> pd.DataFrame:
     """How much of the archive has been joined to a played match, per league.
 

@@ -42,6 +42,9 @@ def main() -> int:
                         help="Archive every division in the file, not only the top five. "
                              "The models cannot price the rest, but the prices are "
                              "unrecoverable either way and the file is 60KB.")
+    parser.add_argument("--no-export", action="store_true",
+                        help="Skip the CSV mirror. The database is not tracked, "
+                             "so this leaves the archive in one place only.")
     parser.add_argument("--db", type=Path, default=config.DB_PATH)
     args = parser.parse_args()
 
@@ -98,6 +101,17 @@ def main() -> int:
     if not coverage.empty:
         print("\nArchive coverage")
         print(coverage.to_string(index=False))
+
+    # Always, not on a flag. The database is not tracked, so without this the
+    # one table that cannot be rebuilt from anything exists in exactly one
+    # place. Commit `data/snapshots/` after running this.
+    if not args.no_export:
+        written = snapshots.export(con)
+        print(
+            f"\nMirrored {written['fixtures']} snapshots and "
+            f"{written['prices']} prices to {written['directory']}."
+        )
+        print("  Commit that directory. It is the only copy of these prices.")
 
     con.close()
     return 0

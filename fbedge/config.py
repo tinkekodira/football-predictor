@@ -123,6 +123,20 @@ FIXTURES_CACHE_HOURS = 2.0
 # stopping.
 FIXTURES_MAX_AGE_HOURS = 72.0
 
+# Where the archive is mirrored as plain CSV, and it is **tracked in git**.
+#
+# The database is not tracked (BACKLOG B3) because it rebuilds from static
+# files in two minutes. The snapshot archive is the one thing in it that does
+# not: the source overwrites `fixtures.csv` and keeps no history, so a price
+# lost here is lost permanently. That is exactly the argument B3 used for
+# keeping the season CSVs tracked, applied to the one table that has a stronger
+# claim to it - the season files could at least be re-downloaded, and these
+# could not.
+#
+# Long format and sorted deterministically so a commit diff is the week's new
+# prices and nothing else.
+SNAPSHOT_EXPORT_DIR = DATA_DIR / "snapshots"
+
 # How far a snapshot's fixture date may drift from the played match's date and
 # still be the same match. One day catches postponements and late kick-offs
 # that roll over midnight, and is tight enough that two legs of a tie cannot

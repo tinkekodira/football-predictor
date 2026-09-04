@@ -60,6 +60,12 @@ nothing, so a pre-match price not captured when it is published is gone
 permanently. Every other table here rebuilds from static files in two minutes;
 that one cannot be rebuilt at all.
 
+For the same reason it is the one table mirrored to **tracked** CSV, in
+`data/snapshots/`. The database is not in the repository because it rebuilds
+itself; this does not, so commit that directory after each run. It is the only
+copy of those prices, and `snapshots.import_export` restores it into a fresh
+clone.
+
 **The database is not in the repository** - it is a 22MB binary that changes
 most sessions, and it is rebuilt by the commands above. The season CSVs it is
 built from *are* committed, so the first step needs no network. See

@@ -49,6 +49,15 @@ data/crests/
 # Anything a run happens to write into `data/` that is not named above.
 data/sample/
 
+# data/snapshots/ is deliberately NOT ignored, and it is the one exception
+# worth stating. Every other table in the database rebuilds from static files
+# in two minutes. The snapshot archive does not rebuild from anything: the
+# source overwrites its fixtures file weekly and keeps no history, so a
+# pre-match price not committed here has no other copy anywhere. Same argument
+# as the season CSVs below, and a stronger one - those could at least be
+# re-downloaded.
+!data/snapshots/
+
 # --------------------------------------------------------------------------
 # Deliberately NOT ignored, so the reasoning survives
 # --------------------------------------------------------------------------

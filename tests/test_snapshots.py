@@ -477,3 +477,105 @@ def _insert_matches(con, rows: list[tuple]) -> None:
         "home_goals, away_goals, result FROM incoming"
     )
     con.unregister("incoming")
+
+
+# --------------------------------------------------------------------------
+# The CSV mirror, which is the only backup this archive has
+# --------------------------------------------------------------------------
+# The database is not tracked in git (BACKLOG B3) because every other table
+# rebuilds from static files in two minutes. This one rebuilds from nothing, so
+# `data/snapshots/` is committed and is the sole copy of these prices.
+
+def test_the_export_writes_both_halves_of_the_archive(con, one_round, tmp_path):
+    snapshot, odds = snapshots.build_snapshot(one_round)
+    snapshots.write_snapshot(con, snapshot, odds)
+
+    written = snapshots.export(con, tmp_path / "mirror")
+    assert written["fixtures"] == 3
+    assert written["prices"] > 0
+    assert (tmp_path / "mirror" / "fixture_snapshots.csv").exists()
+    assert (tmp_path / "mirror" / "snapshot_odds.csv").exists()
+
+
+def test_the_mirror_restores_into_an_empty_database(con, one_round, tmp_path):
+    """The half that makes it a backup rather than a gesture.
+
+    A fresh clone rebuilds every other table from the season files. This is
+    how it gets the archive, and nothing else can supply it.
+    """
+    snapshot, odds = snapshots.build_snapshot(one_round)
+    snapshots.write_snapshot(con, snapshot, odds)
+    snapshots.export(con, tmp_path / "mirror")
+
+    restored = database.connect(tmp_path / "restored.duckdb")
+    counts = snapshots.import_export(restored, tmp_path / "mirror")
+    assert counts["new_snapshots"] == 3
+
+    before = con.execute(
+        "SELECT content_hash, home_team, away_team FROM fixture_snapshots "
+        "ORDER BY content_hash"
+    ).fetchall()
+    after = restored.execute(
+        "SELECT content_hash, home_team, away_team FROM fixture_snapshots "
+        "ORDER BY content_hash"
+    ).fetchall()
+    assert before == after
+
+    prices_before = con.execute(
+        "SELECT COUNT(*) FROM snapshot_odds"
+    ).fetchone()[0]
+    prices_after = restored.execute(
+        "SELECT COUNT(*) FROM snapshot_odds"
+    ).fetchone()[0]
+    assert prices_before == prices_after
+    restored.close()
+
+
+def test_importing_twice_merges_rather_than_duplicating(con, one_round, tmp_path):
+    """It goes through the same content-hash dedupe a live pull does."""
+    snapshot, odds = snapshots.build_snapshot(one_round)
+    snapshots.write_snapshot(con, snapshot, odds)
+    snapshots.export(con, tmp_path / "mirror")
+
+    restored = database.connect(tmp_path / "restored.duckdb")
+    snapshots.import_export(restored, tmp_path / "mirror")
+    second = snapshots.import_export(restored, tmp_path / "mirror")
+    assert second["new_snapshots"] == 0
+    assert second["repeat_snapshots"] == 3
+    assert restored.execute(
+        "SELECT COUNT(*) FROM fixture_snapshots"
+    ).fetchone()[0] == 3
+    restored.close()
+
+
+def test_the_export_is_ordered_so_a_commit_diff_is_only_new_prices(
+    con, one_round, tmp_path
+):
+    """Re-exporting unchanged data must produce a byte-identical file.
+
+    Otherwise every run shows a diff of reordered rows and the week's actual
+    new prices are invisible in it.
+    """
+    snapshot, odds = snapshots.build_snapshot(one_round)
+    snapshots.write_snapshot(con, snapshot, odds)
+
+    snapshots.export(con, tmp_path / "a")
+    snapshots.export(con, tmp_path / "b")
+    for name in ("fixture_snapshots.csv", "snapshot_odds.csv"):
+        assert (tmp_path / "a" / name).read_bytes() == (
+            tmp_path / "b" / name
+        ).read_bytes()
+
+
+def test_exporting_an_empty_archive_is_harmless(tmp_path):
+    con = database.connect(tmp_path / "bare.duckdb")
+    written = snapshots.export(con, tmp_path / "mirror")
+    assert written["fixtures"] == 0
+    con.close()
+
+
+def test_importing_with_no_mirror_present_is_harmless(tmp_path):
+    con = database.connect(tmp_path / "bare.duckdb")
+    counts = snapshots.import_export(con, tmp_path / "absent")
+    assert counts["new_snapshots"] == 0
+    con.close()
