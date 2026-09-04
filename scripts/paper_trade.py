@@ -121,7 +121,7 @@ def main() -> int:
             )
         print()
 
-    _report(con, leagues)
+    report(con, leagues)
 
     if args.open:
         _list_open(con, leagues)
@@ -130,7 +130,7 @@ def main() -> int:
     return 0
 
 
-def _report(con, leagues) -> None:
+def report(con, leagues) -> None:
     summary = ledger.summary(con, leagues=leagues)
     width = 78
     print("=" * width)

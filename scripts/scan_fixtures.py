@@ -443,10 +443,15 @@ def _record(con, frame, args, as_of, price_source) -> None:
         f"{counts['repeat']} already held."
     )
     if counts["repeat_other_revision"]:
+        # Stated, not warned about. After any commit this is every standing
+        # claim, every run - so phrasing it as an alarm would teach the reader
+        # to skip the line. What is actually actionable is *which* revision.
+        where = ", ".join(counts["prior_revisions"]) or "an unknown revision"
         print(
-            f"  {counts['repeat_other_revision']} repeat(s) arrived from a "
-            "different revision of the code. The claim is unchanged; the "
-            "arithmetic behind it may not be. See BACKLOG B15."
+            f"  {counts['repeat_other_revision']} standing claim(s) were first "
+            f"recorded under {where}. Their stored numbers are unchanged; only "
+            "worth a look if you have since changed how a price or a "
+            "probability is computed. See BACKLOG B15."
         )
     print(
         "  Nothing has been staked. Settle and read it back with "

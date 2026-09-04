@@ -463,7 +463,8 @@ def record(con, claims: pd.DataFrame) -> dict:
     """
     create_tables(con)
     if claims is None or claims.empty:
-        return {"seen": 0, "new": 0, "repeat": 0, "repeat_other_revision": 0}
+        return {"seen": 0, "new": 0, "repeat": 0, "repeat_other_revision": 0,
+                "prior_revisions": []}
 
     con.register("incoming_claims", claims)
     existing = con.execute(
@@ -472,16 +473,26 @@ def record(con, claims: pd.DataFrame) -> dict:
     ).df()
     known = set(existing["bet_id"]) if not existing.empty else set()
 
+    # **Which revisions those standing claims were first recorded under.**
+    # Reported as a set rather than only a count, because the count alone is
+    # not actionable: after any commit it is simply "all of them", every run,
+    # for ever. What a reader can actually do something with is *which* earlier
+    # revision, so they can ask whether anything between there and here changed
+    # how a price or a probability is computed. See BACKLOG B15.
     other_revision = 0
+    prior_revisions: list[str] = []
     if not existing.empty:
         incoming_versions = dict(zip(claims["bet_id"], claims["code_version"]))
-        other_revision = int(
-            sum(
-                1
-                for _, row in existing.iterrows()
-                if (row["code_version"] or "")
-                != (incoming_versions.get(row["bet_id"]) or "")
+        differing = existing[
+            existing.apply(
+                lambda row: (row["code_version"] or "")
+                != (incoming_versions.get(row["bet_id"]) or ""),
+                axis=1,
             )
+        ]
+        other_revision = int(len(differing))
+        prior_revisions = sorted(
+            {str(v) for v in differing["code_version"].dropna() if str(v)}
         )
 
     con.execute(
@@ -510,6 +521,7 @@ def record(con, claims: pd.DataFrame) -> dict:
         "new": int(len(fresh)),
         "repeat": int(len(claims) - len(fresh)),
         "repeat_other_revision": other_revision,
+        "prior_revisions": prior_revisions,
     }
 
 

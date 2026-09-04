@@ -529,9 +529,22 @@ recorded what the scan claimed, so that rule described a procedure nobody could
 carry out.
 
 ```
+python scripts/weekly.py                     # all of it, twice a week
+```
+
+or the steps by hand:
+
+```
 python scripts/scan_fixtures.py --record     # file today's board
 python scripts/paper_trade.py                # settle it, and read the record
 ```
+
+**Run `weekly.py` on the source's own cadence** — Friday before 17:00 British
+time, Tuesday before 13:00 — because the price file is overwritten each time it
+is rebuilt and a Friday missed is a week of forward evidence that cannot be
+recovered. It archives, refreshes results, records the board, settles what can
+be settled and prints the record. Every step is safe to repeat, so running it
+twice costs nothing.
 
 The app carries the same record as a **Paper ledger** tab — open bets, settled
 claims and withheld picks, each in its own view. That page only ever reads:

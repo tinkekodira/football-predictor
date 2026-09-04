@@ -65,7 +65,7 @@ weeks, judge on the CLV from *that* period - is unchanged.
 
 ## Current status
 
-- 599 tests passing, 1 skipped (`python -m pytest`).
+- 611 tests passing, 1 skipped (`python -m pytest`).
 - **A paper-trading ledger exists, and it is the first thing here that
   accumulates evidence going forward rather than backward.** The standing rule
   has always been "paper-trade for several weeks and judge it on the CLV from
@@ -680,6 +680,64 @@ only report that something went wrong.
 The tab is deliberately incapable of writing. Recording and settling are writes
 to an append-only forward record, and a page that mutated one on every load
 would corrupt the single measurement this project cannot reconstruct.
+
+### One command, run twice a week
+
+`scripts/weekly.py` chains archive -> refresh results -> record -> settle ->
+report. The ledger only accrues if the first two of those happen on the
+source's own cadence, and a Friday missed is a week of forward evidence that
+cannot be recovered - so the routine had to become one thing to schedule rather
+than four things to remember.
+
+- **The order is a risk ordering, not a logical one.** Archiving is first and
+  its failure never stops the run, because it is the only step whose input
+  disappears. Everything after it can be downloaded again tomorrow, so
+  abandoning them over a network blip would turn one lost thing into four.
+- **It archives a stale file and refuses to record from it.** Two different
+  decisions on the same input: the rows are still the only surviving copy of
+  those prices, but pricing a board from them would file confident claims on
+  matches that may already have kicked off - and unlike a scan, which scrolls
+  away, a ledger entry is permanent.
+- **The write lock is checked once, up front.** With the app open all four
+  steps would fail in turn with their own tracebacks; one clear refusal is
+  better than four confusing ones.
+- **Every step is safe to repeat**, which is what makes it safe to schedule:
+  snapshots dedupe by content hash, claims by their identity hash, and a
+  settled bet is never restated. Verified by running it twice.
+
+`tests/test_weekly.py` (12) tests the wiring rather than the steps - the order,
+what survives a failure, and what refuses - because the steps themselves are
+covered in three other files.
+
+**One trap found while testing it.** `snapshots.export` writes to
+`data/snapshots/` whatever database it is handed, so a run against a scratch
+copy - which is how all of this was tested, with the app holding the real
+database - would silently overwrite the tracked backup of the one table that
+cannot be rebuilt. `weekly.py` now exports only when `--db` resolves to the
+configured database, and says so when it does not. Skipped rather than
+redirected: a test run has no business producing a backup at all.
+
+### The B15 notice was firing on every claim, every run
+
+The first live run printed "329 repeats came from a different revision" and
+would have printed it after every commit for ever. `code_version` sits outside
+the identity hash on purpose, so after any commit *every* standing claim is a
+repeat from a different revision - which makes the count, on its own, never
+actionable. A warning that always fires is a warning nobody reads, and this
+project has better reasons than most to care about that.
+
+`record` now returns `prior_revisions` and the notice names them: "329 standing
+claim(s) were first recorded under 7e26b3e." Same information, phrased as a
+statement rather than an alarm, and pointing at the thing somebody can actually
+check - whether anything between that revision and this one changed how a price
+or a probability is computed.
+
+**Note what was *not* done.** The tempting fix is to compare the stored
+probability against the recomputed one and only warn when they differ. That
+would be wrong: the model legitimately moves between sightings because it has
+seen another day of results, so drift cannot distinguish a code change from new
+data without re-running the old code. The honest answer is to report the
+revision and let a reader judge.
 
 ### Three reasons a bet did not settle, and only one is worth acting on
 

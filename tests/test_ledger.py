@@ -149,7 +149,8 @@ def test_recording_the_same_board_twice_records_it_once(clean, played):
     first = ledger.record(clean, claims)
     second = ledger.record(clean, claims)
 
-    assert first == {"seen": 1, "new": 1, "repeat": 0, "repeat_other_revision": 0}
+    assert first == {"seen": 1, "new": 1, "repeat": 0,
+                     "repeat_other_revision": 0, "prior_revisions": []}
     assert second["new"] == 0
     assert second["repeat"] == 1
     assert len(ledger.load_bets(clean)) == 1
@@ -238,6 +239,11 @@ def test_a_repeat_from_a_different_revision_is_counted_and_not_re_recorded(
     assert counts["new"] == 0
     assert counts["repeat"] == 1
     assert counts["repeat_other_revision"] == 1
+    # **Which revision, not merely how many.** After any commit the count is
+    # every standing claim, every run, so on its own it is never actionable -
+    # it would be a warning that always fires, which is a warning nobody reads.
+    # The revision it was recorded under is the part somebody can check.
+    assert counts["prior_revisions"] == ["abc1234"]
     # First seen wins, so the stored revision is the one that made the claim.
     assert ledger.load_bets(clean)["code_version"].iloc[0] == "abc1234"
 
