@@ -65,7 +65,13 @@ weeks, judge on the CLV from *that* period - is unchanged.
 
 ## Current status
 
-- 402 tests passing (`python -m pytest`).
+- 593 tests passing, 1 skipped (`python -m pytest`).
+- **A paper-trading ledger exists, and it is the first thing here that
+  accumulates evidence going forward rather than backward.** The standing rule
+  has always been "paper-trade for several weeks and judge it on the CLV from
+  *that* period"; nothing recorded what the scan claimed, so that procedure
+  could not be carried out. `fbedge/ledger.py` records it. It will say nothing
+  for weeks, and that is the design, not a defect. See the ledger section.
 - **The CLV measurement was broken, and is now fixed and re-baselined.** A
   benchmark change in 2024 plus favourite-longshot bias in multiplicative
   margin removal inflated every historical CLV figure. `margin_method` now
@@ -562,7 +568,99 @@ Ten requests, then the same for the other four leagues. If -7% survives on
 building on. If it does not, it was one season of noise and the availability
 null stands.
 
-## What was added in the home-page session (most recent)
+## What was added in the paper-ledger session (most recent)
+
+A record of what the scan claimed, so the gate's own procedure can be carried
+out. Built on the `paper-trading-ledger` branch.
+
+- `fbedge/ledger.py` - the ledger: `Provenance`, `bet_id`, `build_claims`,
+  `record`, `load_bets`, `settle_open`, `summary`, `withheld_comparison`.
+- `scripts/scan_fixtures.py` - a `--record` flag, and canonical column names.
+- `scripts/paper_trade.py` - settle the open bets and print the running record.
+- `tests/test_ledger.py` - 24 tests. **593 in total**, from 569.
+
+### Why this and not a model change
+
+The gate has been shut for the whole life of this project and the standing
+rules say what would open it: paper-trade for several weeks, judge on the CLV
+from *that* period rather than the historical backtest. That sentence described
+a procedure nobody could carry out, because no table recorded what the scan
+claimed. Every other measurement here can be recomputed from static inputs; a
+forward claim cannot be recomputed after the fact, because by then the result
+is known and the model has moved on. **It is the same argument that justifies
+`snapshots.py`, one level up**, and it is time-sensitive for the same reason:
+evidence only starts accruing once the thing exists.
+
+### Five decisions worth not reversing
+
+- **The claim is immutable and the outcome lives in a separate table.** Two
+  tables, not one with columns filled in later, because immutability enforced
+  by a schema beats immutability enforced by a convention somebody has to
+  remember. `settle_open` refuses to restate a settled bet whatever it would
+  compute now, and `test_a_settled_bet_is_never_restated` pins it. A ledger
+  that could be re-settled under changed code once the results were known would
+  be worth nothing, and would still pass every arithmetic test in the file.
+- **Provenance is stored per row and it is resolved, not requested.**
+  `ridge=None` means "whatever suits the target" and `target=None` means "the
+  default, and degrade quietly without xG", so a request is a question and only
+  the fitted model knows the answer. The scan now carries `target`, `ridge` and
+  `half_life_days` off `bundle.goals` per row, because a scan spans five
+  leagues and nothing guarantees they resolve alike. This is B1, B10 and B15
+  answered in advance instead of afterwards.
+- **What counts as "the same claim" is the whole design.** In the identity
+  hash: fixture, market, selection, line, price, book, model settings. Not in
+  it: `as_of` and the model probability it implies - a bet that sits on the
+  board for three days is one bet, not three. A *moved price* is a new claim,
+  because betting into 2.10 and into 2.30 settle differently. `code_version` is
+  outside the hash but stored and reported on a repeat, which is the only way a
+  reader learns the code moved under a standing claim (B15).
+- **Withheld rows are recorded, and carry `staked = FALSE`.** B17's two
+  thresholds were set from a backtest, and whether they are right *going
+  forward* is answerable only by settling the rows they suppress alongside the
+  ones they keep. `withheld_comparison` is the ledger marking B17's homework. A
+  ledger that recorded only the bets it liked could never mark its own.
+- **Flat stakes, CLV as the headline, profit below it.** One unit per bet and no
+  Kelly. Over a few hundred bets ROI is close to noise while CLV is measurable
+  in weeks, which is the project's own rule and the reason the gate is phrased
+  in CLV. A staking scheme would make the profit column louder and no more
+  informative.
+
+### CLV is computed by the backtest's own code, deliberately
+
+`settle_open` calls `backtest._market_probabilities` and forms
+`price_taken * closing_fair - 1`, the same expression `backtest.py` uses.
+`test_closing_line_value_matches_the_backtests_own_formula` recomputes the
+benchmark independently and asserts they agree. If those two ever diverge,
+every comparison between a forward CLV figure and the -1.500% backtested one is
+invalid and nothing else in the suite would notice.
+
+### Verified end to end, and what it says so far
+
+Against a copy of the live database, `--no-fetch --record` filed **329 claims
+across five leagues: 264 ranked, 65 withheld.** Running it again recorded 0 new
+and 329 repeats, so the dedupe holds on a real board. Settlement was then
+checked on 40 real played E0 selections spanning 1X2, totals and Asian
+handicap: margins strip to 1.000 on every market, a 4-3 settles `home -0.5` as
+a winner and `over 2.5` as a winner, and CLV matches the formula to six places.
+
+**The report currently says nothing, correctly.** Every archived fixture is
+still in the future, so 0 of 329 are settled. The first CLV number is weeks
+away and will be far too thin to read when it arrives - `paper_trade.py`
+refuses to characterise a mean under 30 bets and prints the clustered standard
+error beside every figure it does show.
+
+### What this does not do
+
+It does not reopen the gate, and it is not evidence about the model. It is the
+instrument the gate asks for, and the honest expectation is that it will
+eventually confirm the backtest: CLV around -1.5%, measured forward instead of
+backward. **A ledger that agreed with the backtest would be a success for the
+ledger**, and the second independent confirmation that this model has no edge.
+
+Not built, and the obvious next step: a Streamlit tab. The command line is the
+whole interface today.
+
+## What was added in the home-page session
 
 A calendar home page, in the shape of a live-scores site: scroll a date, see
 every fixture in the top five leagues on it, click one for the detail page that

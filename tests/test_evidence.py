@@ -125,7 +125,7 @@ def test_the_scan_prices_only_fixtures_that_have_not_kicked_off(
         scan_db, as_of, ["E0"], backtest.DEFAULT_PRICE_SOURCE
     )
     assert not frame.empty
-    assert (pd.to_datetime(frame["date"]).dt.date >= as_of).all()
+    assert (pd.to_datetime(frame["fixture_date"]).dt.date >= as_of).all()
 
 
 # --------------------------------------------------------------------------
@@ -144,9 +144,10 @@ def test_the_scan_prices_the_selections_the_source_published(
         for m, s, v in zip(stored["market"], stored["selection"], stored["line"])
     }
     # Every scanned handicap line must be one the source actually offered.
+    # `selection` is the raw settlement key and `line` is its own column, so
+    # neither has to be parsed back out of a display label any more.
     for row in frame[frame["market"] == "asian_handicap"].itertuples():
-        line = float(row.selection.split()[-1])
-        assert ("asian_handicap", row.selection.split()[0], line) in published
+        assert ("asian_handicap", row.selection, round(float(row.line), 3)) in published
 
 
 def test_expected_value_is_sorted_and_uses_the_taken_price(
@@ -157,7 +158,7 @@ def test_expected_value_is_sorted_and_uses_the_taken_price(
     assert frame["expected_value"].is_monotonic_decreasing
     row = frame.iloc[0]
     assert row["expected_value"] == pytest.approx(
-        row["model_probability"] * row["price"] - 1.0, abs=1e-6
+        row["model_probability"] * row["price_taken"] - 1.0, abs=1e-6
     )
 
 
@@ -170,7 +171,7 @@ def test_the_book_flag_changes_which_price_is_taken(scan_db, as_of, archived):
     assert set(default["book"]) == {"market_max"}
     assert set(single["book"]) == {"bet365"}
     # And the market maximum is by definition never worse than one book's price.
-    assert default["price"].max() >= single["price"].max()
+    assert default["price_taken"].max() >= single["price_taken"].max()
 
 
 def test_a_fixture_the_model_barely_knows_is_flagged(scan_db, as_of, archived):

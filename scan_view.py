@@ -85,10 +85,11 @@ def _render_withheld(withheld) -> None:
         )
         st.markdown("##### Withheld selections, and the reason for each")
         table = withheld[
-            ["league", "fixture", "market", "selection", "price",
+            ["league", "fixture", "market", "selection_label", "price_taken",
              "model_probability", "expected_value", "withheld_reason"]
         ].rename(
-            columns={"model_probability": "model", "expected_value": "EV",
+            columns={"selection_label": "selection", "price_taken": "price",
+                     "model_probability": "model", "expected_value": "EV",
                      "withheld_reason": "why it is withheld"}
         )
         st.dataframe(
@@ -181,8 +182,8 @@ def render(db_path: str, half_life: float, ridge: float | None) -> None:
 
     stored_evidence = evidence_mod.load(con)
     table = shown[
-        ["league", "date", "fixture", "market", "selection", "price",
-         "model_probability", "expected_value", "thin_history"]
+        ["league", "fixture_date", "fixture", "market", "selection_label",
+         "price_taken", "model_probability", "expected_value", "thin_history"]
     ].copy()
     table["evidence"] = [
         evidence_mod.short_labels(
@@ -196,6 +197,8 @@ def render(db_path: str, half_life: float, ridge: float | None) -> None:
     ]
     table = table.rename(
         columns={
+            "fixture_date": "date", "selection_label": "selection",
+            "price_taken": "price",
             "model_probability": "model", "expected_value": "EV",
             "thin_history": "model barely knows",
         }

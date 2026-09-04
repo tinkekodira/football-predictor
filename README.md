@@ -503,6 +503,7 @@ have completely turned over. The models do not use it.
 | 2 | Dixon-Coles goals model, negative-binomial corners and cards | **done** |
 | 3 | Walk-forward backtest, calibration, closing line value, tuning | **done** |
 | 4 | Fixture archive, pre-match EV scan, forward calendar, market coverage | **done** |
+| 4b | Paper-trading ledger: record every claim, settle it, measure CLV forward | **done** |
 | 5a | xG from Understat | **mostly done** |
 | 5b | UEFA competitions, **results only** — see below | blocked on a source |
 | 5c | Fatigue and congestion, line-ups | |
@@ -518,6 +519,36 @@ that stops a price ever reaching a reader without its track record.
 to call it. Prices in this source are collected on Friday afternoons no later
 than 17:00 British time for weekend fixtures and Tuesdays no later than 13:00
 for midweek ones. Nothing here watches a market move.
+
+### The paper-trading ledger, and why it comes before any model work
+
+The rule that stops this project staking money says: paper-trade for several
+weeks recording what would have been bet, and judge it on the closing line
+value from *that* period rather than on the historical backtest. Nothing
+recorded what the scan claimed, so that rule described a procedure nobody could
+carry out.
+
+```
+python scripts/scan_fixtures.py --record     # file today's board
+python scripts/paper_trade.py                # settle it, and read the record
+```
+
+Every claim is stored with the model settings that produced it — resolved, not
+requested — because a "+6% EV" recorded six weeks ago is worthless if the
+defaults moved underneath it. The claim is immutable and its outcome lives in a
+separate table, so a bet cannot be re-settled under changed code once the
+result is known. Withheld selections are recorded too, flagged unstaked, so the
+two thresholds in the table above can eventually be marked against what
+actually happened rather than only against the backtest that set them.
+
+**It reports nothing for weeks, by design.** Prices reach about three days
+ahead, so a young ledger has a handful of settled bets and a mean over a
+handful of bets is noise. The report prints a clustered standard error beside
+every figure and refuses to characterise a mean under thirty bets.
+
+The honest expectation is that this eventually confirms the backtest at around
+−1.5%, measured forward instead of backward. That would be a success for the
+ledger and the second independent confirmation that the model has no edge.
 
 ### Phase 5 was reordered, and half of it was rescoped
 

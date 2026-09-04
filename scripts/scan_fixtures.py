@@ -48,7 +48,7 @@ import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
 from fbedge import (  # noqa: E402
-    backtest, config, database, evidence, markets, pricing, snapshots,
+    backtest, config, database, evidence, ledger, markets, pricing, snapshots,
 )
 from fbedge import predict as predict_mod  # noqa: E402
 from fbedge.models import base  # noqa: E402
@@ -232,14 +232,33 @@ def _value_fixture(
         out.append(
             {
                 "league": fixture.league,
-                "date": fixture.fixture_date,
-                "kickoff": fixture.kickoff_time,
+                "fixture_date": fixture.fixture_date,
+                "kickoff_time": fixture.kickoff_time,
+                # Identity, carried so a scan row can be written to the paper
+                # ledger and later joined to the match that was played. The
+                # snapshot's own hash comes too: it says which archived pull
+                # this price came from, which is what makes a claim auditable
+                # back to a stored observation rather than to a memory of one.
+                "fixture_key": fixture.fixture_key,
+                "content_hash": fixture.content_hash,
+                "home_team": fixture.home_team,
+                "away_team": fixture.away_team,
                 "fixture": f"{fixture.home_team} v {fixture.away_team}",
                 "market": market,
-                "selection": priced.label,
+                # **`selection` is the raw key, not the label.** It is what
+                # `settlement.settle` dispatches on, and it means the same
+                # thing here as it does in the `odds` table and in the
+                # backtest's records. The pretty version is beside it: a
+                # column that reads as a label in one module and as a
+                # settlement key in another is the kind of difference nobody
+                # sees until a bet settles wrongly.
+                "selection": selection,
+                "selection_label": priced.label,
+                "line": line_value,
                 "model_probability": priced.probability,
+                "push_probability": priced.push_probability,
                 "fair_price": priced.fair_price,
-                "price": price,
+                "price_taken": price,
                 "book": book,
                 "market_probability": market_probability,
                 "market_source": fair_source,
@@ -252,6 +271,16 @@ def _value_fixture(
                 ),
                 "collection_window": fixture.collection_window,
                 "pulled_at_utc": fixture.first_pulled_at_utc,
+                # **The settings the fit resolved to, not the ones asked for.**
+                # `ridge=None` means "whatever suits the target" and `target=None`
+                # means "the default, and degrade quietly without xG", so the
+                # request is a question and only the model knows the answer.
+                # Carried per row because a scan spans several leagues and
+                # nothing guarantees they resolve alike; the paper ledger stores
+                # them as the claim's provenance.
+                "target": bundle.goals.target,
+                "ridge": bundle.goals.ridge,
+                "half_life_days": bundle.goals.half_life_days,
                 "thin_history": thin,
                 "n_home": n_home,
                 "n_away": n_away,
@@ -303,6 +332,13 @@ def main() -> int:
     parser.add_argument("--allow-stale", action="store_true",
                         help="Scan anyway when the file looks out of date. "
                              "You are unlikely to want this.")
+    parser.add_argument("--record", action="store_true",
+                        help="Write every valued selection to the paper-trading "
+                             "ledger, withheld rows included and flagged as "
+                             "unstaked. Recording the same board twice is "
+                             "harmless: a claim is identified by its price and "
+                             "model settings, so a second scan of an unchanged "
+                             "board adds nothing.")
     parser.add_argument("--csv", type=Path, default=None)
     parser.add_argument("--db", type=Path, default=config.DB_PATH)
     args = parser.parse_args()
@@ -362,11 +398,60 @@ def main() -> int:
     for note in dict.fromkeys(notes):
         print(f"  - {note}")
 
+    if args.record:
+        _record(con, frame, args, as_of, price_source)
+
     if args.csv:
         frame.to_csv(args.csv, index=False)
         print(f"\nEvery valued selection written to {args.csv}")
     con.close()
     return 0
+
+
+def _record(con, frame, args, as_of, price_source) -> None:
+    """File this board in the paper ledger.
+
+    **The whole board goes in, not the rows above `--min-edge`.** That flag is
+    a display filter, and the ledger is a record of what the model claimed.
+    Filtering on the way in would leave the ledger unable to say anything about
+    the selections the scan chose not to show - which is every withheld row and
+    every negative-EV one, and the withheld rows are precisely the population
+    BACKLOG B17 needs settled to know whether its thresholds are right.
+    Filtering on the way out costs nothing.
+    """
+    provenance = ledger.Provenance(
+        # Run-level settings. The three the fit resolves for itself - target,
+        # ridge, half-life - are overridden per row from the model that
+        # actually priced each selection, so these are only ever seen by a
+        # scan that priced nothing.
+        target=base.DEFAULT_TARGET,
+        blend_weight=base.DEFAULT_BLEND_WEIGHT,
+        ridge=float("nan") if args.ridge is None else float(args.ridge),
+        half_life_days=float(args.half_life),
+        margin_method="shin",
+        price_source=",".join(price_source),
+        min_matches=int(args.min_matches),
+        max_ev=float(args.max_ev),
+        code_version=ledger.git_revision(),
+    )
+    counts = ledger.record(
+        con, ledger.build_claims(frame, provenance, as_of=as_of)
+    )
+    print()
+    print(
+        f"  Paper ledger: {counts['new']} new claim(s) recorded, "
+        f"{counts['repeat']} already held."
+    )
+    if counts["repeat_other_revision"]:
+        print(
+            f"  {counts['repeat_other_revision']} repeat(s) arrived from a "
+            "different revision of the code. The claim is unchanged; the "
+            "arithmetic behind it may not be. See BACKLOG B15."
+        )
+    print(
+        "  Nothing has been staked. Settle and read it back with "
+        "scripts/paper_trade.py."
+    )
 
 
 def _render(frame, stored_evidence, args, as_of, con) -> None:
@@ -408,8 +493,8 @@ def _render(frame, stored_evidence, args, as_of, con) -> None:
         flag = " (*)" if row.thin_history else ""
         print(
             f"  {(row.fixture + flag)[:25]:<26}{row.market:<17}"
-            f"{row.selection[:12]:<13}"
-            f"{row.price:>7.2f}{row.model_probability:>8.1%}"
+            f"{row.selection_label[:12]:<13}"
+            f"{row.price_taken:>7.2f}{row.model_probability:>8.1%}"
             f"{row.expected_value:>+8.1%}   {tag}"
         )
 
@@ -475,8 +560,9 @@ def _render_withheld(withheld, width: int, args) -> None:
     print("  " + "-" * (width - 2))
     for row in withheld.head(args.top).itertuples():
         print(
-            f"  {row.fixture[:25]:<26}{row.market:<17}{row.selection[:12]:<13}"
-            f"{row.price:>7.2f}{row.model_probability:>8.1%}"
+            f"  {row.fixture[:25]:<26}{row.market:<17}"
+            f"{row.selection_label[:12]:<13}"
+            f"{row.price_taken:>7.2f}{row.model_probability:>8.1%}"
             f"{row.expected_value:>+8.1%}"
         )
         print(f"      {row.withheld_reason}.")
