@@ -190,6 +190,27 @@ INJURY_LEAGUE_IDS: dict[str, int] = {
 # coming close to the limit.
 INJURY_CACHE_HOURS = 2
 
+# The free plan's published allowances, confirmed 2026-09-04: 100 requests a
+# day, resetting at 00:00 UTC with unused requests lost, and 10 a minute.
+#
+# **Both are enforced locally, before the request goes out.** A spent quota is
+# not a soft failure: the endpoint keeps answering 200 with an empty list on
+# some errors, so a run that blows the budget can look like a league with
+# nobody injured. And repeated hammering is how access gets withdrawn without
+# warning, which would cost the only keyed source in the project.
+INJURY_DAILY_QUOTA = 100
+INJURY_CALLS_PER_MINUTE = 10
+
+# Stop this many requests short of the published daily limit. One careless
+# loop is all it takes, and leaving a few in reserve means a spent budget can
+# still be diagnosed interactively rather than only tomorrow.
+INJURY_QUOTA_RESERVE = 5
+
+# Where the spend is recorded. A file rather than a variable, because the limit
+# is per key per day and this project is many short-lived processes: an
+# in-memory counter would reset on every script invocation and count nothing.
+INJURY_QUOTA_PATH = DATA_DIR / "raw" / "injuries" / "quota.json"
+
 # **The free plan caps the seasons it will serve.** Confirmed empirically:
 # 2024 returns 3,168 Premier League rows, the current season returns nothing.
 # That is not a bug and not a wrong league id, and the difference matters

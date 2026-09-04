@@ -218,6 +218,118 @@ def api_key() -> str | None:
     return value or None
 
 
+# ----------------------------------------------------------------------
+# The daily budget
+# ----------------------------------------------------------------------
+# The free plan allows a hundred requests a day, resetting at 00:00 UTC, and
+# ten a minute. Both are enforced here, before the request goes out.
+#
+# **Why this is a file and not a counter.** The limit is per key per day, and
+# this project is a collection of short-lived scripts; an in-memory counter
+# resets on every invocation and therefore counts nothing. Two loops in two
+# terminals would each believe they had a hundred calls in hand.
+#
+# **Why a hard stop rather than a warning.** A spent budget is not a loud
+# failure at this endpoint - it answers 429 sometimes and 200-with-an-empty-
+# list other times - and an empty injury list and a broken injury feed look
+# identical on a page. Refusing to make the call is the only way the two stay
+# distinguishable. It is also the only protection against the failure that
+# actually costs something: repeated hammering gets access withdrawn without
+# warning, and this is the project's one keyed source.
+
+
+class QuotaExhausted(InjuryFeedError):
+    """The day's request budget is spent. Not a failure of the feed."""
+
+
+_MINUTE_CALLS: list[float] = []
+
+
+def _quota_path(path: Path | None = None) -> Path:
+    return Path(path) if path is not None else config.INJURY_QUOTA_PATH
+
+
+def _utc_day(now: dt.datetime | None = None) -> str:
+    """The budget day. UTC because that is when the provider resets it."""
+    moment = now or dt.datetime.now(dt.timezone.utc)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=dt.timezone.utc)
+    return moment.astimezone(dt.timezone.utc).date().isoformat()
+
+
+def quota_state(path: Path | None = None, now: dt.datetime | None = None) -> dict:
+    """Today's spend. A new day starts at zero rather than carrying over.
+
+    Unused requests are lost at 00:00 UTC - the provider says so - so nothing
+    accumulates and a stale file from last week reads as an unspent budget,
+    which is correct.
+    """
+    today = _utc_day(now)
+    file = _quota_path(path)
+    used = 0
+    if file.exists():
+        try:
+            stored = json.loads(file.read_text(encoding="utf-8"))
+            if stored.get("day") == today:
+                used = int(stored.get("used", 0))
+        except (json.JSONDecodeError, ValueError, OSError):
+            # A corrupt counter must not be read as "budget available". Zero
+            # is the wrong guess in exactly the dangerous direction, so treat
+            # it as spent-so-far-unknown and start from the limit.
+            used = config.INJURY_DAILY_QUOTA
+    limit = config.INJURY_DAILY_QUOTA - config.INJURY_QUOTA_RESERVE
+    return {
+        "day": today,
+        "used": used,
+        "limit": limit,
+        "published_limit": config.INJURY_DAILY_QUOTA,
+        "remaining": max(0, limit - used),
+    }
+
+
+def record_call(path: Path | None = None, now: dt.datetime | None = None) -> dict:
+    """Count one request against today's budget, and persist it."""
+    state = quota_state(path, now)
+    file = _quota_path(path)
+    file.parent.mkdir(parents=True, exist_ok=True)
+    file.write_text(
+        json.dumps({"day": state["day"], "used": state["used"] + 1}),
+        encoding="utf-8",
+    )
+    return quota_state(path, now)
+
+
+def check_quota(path: Path | None = None, now: dt.datetime | None = None) -> dict:
+    """Raise `QuotaExhausted` if there is no budget left. Silent if there is."""
+    state = quota_state(path, now)
+    if state["remaining"] <= 0:
+        raise QuotaExhausted(
+            f"The injury feed's daily budget is spent: {state['used']} requests "
+            f"used today against a self-imposed ceiling of {state['limit']} "
+            f"(the plan allows {state['published_limit']}, and "
+            f"{config.INJURY_QUOTA_RESERVE} are held back so a spent budget "
+            "can still be diagnosed). It resets at 00:00 UTC. Nothing was "
+            f"requested. The counter is {_quota_path(path)}; delete it only if "
+            "you know the spend was not real."
+        )
+    return state
+
+
+def _respect_minute_limit(limit: int | None = None) -> None:
+    """Ten a minute, enforced locally so the eleventh is never wasted."""
+    ceiling = limit or config.INJURY_CALLS_PER_MINUTE
+    while True:
+        now = time.monotonic()
+        _MINUTE_CALLS[:] = [t for t in _MINUTE_CALLS if now - t < 60.0]
+        if len(_MINUTE_CALLS) < ceiling:
+            _MINUTE_CALLS.append(now)
+            return
+        time.sleep(max(0.0, 60.0 - (now - _MINUTE_CALLS[0])) + 0.1)
+        # Retire the call we waited out, so a stubbed or short sleep cannot
+        # spin here for ever.
+        _MINUTE_CALLS.pop(0)
+
+
 def _cache_path(cache_dir: Path, league: str, season: int) -> Path:
     return Path(cache_dir) / f"{league}_{season}.json"
 
@@ -242,11 +354,21 @@ def fetch_league(
     force: bool = False,
     key: str | None = None,
     now: dt.datetime | None = None,
+    quota_path: Path | None = None,
 ) -> dict:
     """One league-season of injuries, from cache when it is fresh enough.
 
-    Caching is not politeness here, it is the budget: the free plan allows a
-    hundred requests a day and the page re-renders on every click.
+    **Caching is not politeness here, it is the budget.** The free plan allows
+    a hundred requests a day and the page re-renders on every click, so a cache
+    miss on a page load would spend the day's allowance in a few minutes of
+    browsing. One call covers a whole league-season - never call this from
+    inside a per-match loop, which is the shape that turns five requests into
+    three hundred and eighty.
+
+    A cache hit costs nothing and is not counted. A miss is checked against the
+    persistent daily counter and the per-minute limit *before* the request goes
+    out, and refused outright when the budget is gone rather than being allowed
+    to fail at the server.
     """
     league_id = config.INJURY_LEAGUE_IDS.get(league)
     if league_id is None:
@@ -265,6 +387,11 @@ def fetch_league(
             f"No injury feed key. Set {config.INJURY_API_KEY_ENV} to a free "
             "API-Football key from https://www.api-football.com/."
         )
+
+    # Both limits, before the socket is opened. A request refused here costs
+    # nothing; one refused by the server costs a request from a hundred.
+    check_quota(quota_path)
+    _respect_minute_limit()
 
     url = f"{config.INJURY_API_URL}?league={league_id}&season={season}"
     request = urllib.request.Request(
@@ -323,6 +450,11 @@ def fetch_league(
             "fetches one, so most of the league would be missing. Add paging "
             "before trusting anything from it."
         )
+
+    # Counted after the response comes back, not before: a request that never
+    # reached the provider did not spend anything, and over-counting would
+    # eventually refuse work the budget could have covered.
+    record_call(quota_path)
 
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload), encoding="utf-8")

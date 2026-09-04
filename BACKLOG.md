@@ -338,6 +338,34 @@ make that explicit: odds-less matches are fitted and priced, contribute to
 calibration and to team strengths, and can never be settled as bets, because a
 record with no price has no expected value. Every run prints the count.
 
+## B14. The two "does team news matter" scripts get mistaken for each other
+
+**Severity: low — a documentation defect that has already misdirected work.**
+
+They answer the same question from different data and have opposite
+constraints, and the names do not make that obvious.
+
+`scripts/availability_signal.py` reads `match_lineups`, which
+`scripts/build_rosters.py` downloads from Understat. **No key, no quota, every
+season already in the database.** It has been run across five leagues and the
+result is the documented null. It is also the free availability proxy itself,
+implemented in `fbedge/availability.py`, with the honest caveat that Understat
+lists only players who *appeared* — so it conflates injury, suspension,
+rotation and transfer.
+
+`scripts/injury_signal.py` reads API-Football. **Keyed, 100 requests a day, and
+capped at recent seasons.** It is the one with a data ceiling: roughly 2022 to
+2024, which is three seasons of a question that wants ten. It has been run and
+produced the retest result, and `--status` now prints exactly what the
+unanswerable half needs and what it would cost.
+
+**This has cost time once.** A brief written on 2026-09-04 asked for
+`availability_signal.py` to be marked blocked and excluded from CI on the
+grounds that it needed a historical injury record, and then asked for the
+line-up proxy to be implemented as the honest alternative — which is what that
+script already is. Neither was done, because both were already false. Both
+docstrings now open by saying which of the two they are.
+
 ---
 
 ## Not bugs — open questions, kept here so they stay visible

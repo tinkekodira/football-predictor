@@ -18,6 +18,7 @@ import datetime as dt
 import pandas as pd
 import pytest
 
+from fbedge import config
 from scripts.injury_signal import new_out_counts, out_counts
 
 
@@ -178,3 +179,99 @@ def test_nobody_matching_the_filter_gives_an_empty_frame(builder):
         rows(("Arsenal", "2024-08-17", "A", False, True)), doubtful=False
     )
     assert frame.empty
+
+
+# --------------------------------------------------------------------------
+# Which question is blocked, and which is not
+# --------------------------------------------------------------------------
+# The two scripts get confused, so this pins which is which. `injury_signal.py`
+# reads the keyed feed and is capped by its free-plan season ceiling.
+# `availability_signal.py` reads Understat line-ups, which are free and cover
+# every season already in the database, and has been run to a null result.
+
+def test_the_injury_study_states_what_it_cannot_answer(capsys):
+    from scripts import injury_signal
+
+    injury_signal.print_blocked_status()
+    printed = capsys.readouterr().out
+    assert "BLOCKED" in printed
+    # It must say what is missing, what it would take, and what it costs -
+    # not merely that something is missing.
+    assert "season ceiling" in printed
+    assert str(config.INJURY_FREE_PLAN_LAST_SEASON) in printed
+    assert "/month" in printed
+    # And it must not claim the money should be spent here first.
+    assert "paid odds feed is the first thing" in printed
+
+
+def test_the_status_flag_needs_no_other_argument():
+    """A flag explaining why a question is unanswerable must not demand the
+    parameters of the answer."""
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    result = subprocess.run(
+        [sys.executable, str(root / "scripts" / "injury_signal.py"), "--status"],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "BLOCKED" in result.stdout
+
+
+def test_the_lineup_study_needs_no_key_and_is_not_blocked():
+    """`availability_signal.py` is free, complete, and its result is a null.
+
+    It is also the honest free alternative to an injury feed, which is what
+    `fbedge/availability.py` implements. Pinned because a brief once asked for
+    this script to be marked blocked and for its own implementation to be
+    written from scratch.
+    """
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parent.parent
+        / "scripts" / "availability_signal.py"
+    ).read_text(encoding="utf-8")
+    assert "no API key and no quota" in source
+    assert "Not blocked" in source
+    # And it genuinely does not touch the keyed feed.
+    assert "from fbedge import availability" in source
+    assert "injuries" not in source.split('"""')[2]
+
+
+def test_the_availability_feature_is_derived_from_earlier_matches_only():
+    """The free proxy exists and keeps the point-in-time contract.
+
+    `availability.for_fixture` appends a placeholder for the fixture being
+    described and asks for the features at that position, and `_features_at`
+    never reads the entry it describes. That is the mechanism; this asserts the
+    behaviour.
+    """
+    import pandas as pd
+    from fbedge import availability
+
+    lineups = pd.DataFrame(
+        [
+            {"match_id": f"m{i}", "player_id": f"p{p}", "minutes": 90.0,
+             "started": True, "is_home": True, "xgchain": 0.5}
+            for i in range(10) for p in range(11)
+        ]
+    )
+    matches = pd.DataFrame(
+        [
+            {"match_id": f"m{i}", "date": pd.Timestamp("2026-01-01")
+             + pd.Timedelta(days=7 * i), "home_team": "A", "away_team": "B"}
+            for i in range(10)
+        ]
+    )
+    early = availability.for_fixture(
+        lineups, matches, "A", "B", pd.Timestamp("2026-03-01")
+    )
+    late = availability.for_fixture(
+        lineups, matches, "A", "B", pd.Timestamp("2026-04-01")
+    )
+    assert isinstance(early[0], float) and isinstance(late[0], float)
+    # An unchanged squad has nobody newly missing, whichever cut-off is used.
+    assert early[0] == 0.0

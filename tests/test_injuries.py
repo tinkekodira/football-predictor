@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -471,3 +472,118 @@ def test_a_paged_response_is_refused_rather_than_half_read(tmp_path, monkeypatch
     monkeypatch.setattr(injuries.time, "sleep", lambda *a: None)
     with pytest.raises(injuries.InjuryFeedError, match="pages"):
         injuries.fetch_league("E0", 2026, tmp_path, force=True)
+
+
+# --------------------------------------------------------------------------
+# The daily budget
+# --------------------------------------------------------------------------
+# A hundred requests a day, resetting at 00:00 UTC. These matter more than they
+# look: a spent budget is not a loud failure at this endpoint, and an empty
+# injury list and a broken injury feed look identical on a page.
+
+def test_a_fresh_day_starts_with_the_whole_budget(tmp_path):
+    state = injuries.quota_state(tmp_path / "quota.json")
+    assert state["used"] == 0
+    assert state["remaining"] == (
+        config.INJURY_DAILY_QUOTA - config.INJURY_QUOTA_RESERVE
+    )
+
+
+def test_calls_are_counted_and_survive_the_process(tmp_path):
+    """A file, not a variable. This project is many short-lived scripts, and an
+    in-memory counter would reset on every invocation and count nothing."""
+    path = tmp_path / "quota.json"
+    for _ in range(3):
+        injuries.record_call(path)
+    assert injuries.quota_state(path)["used"] == 3
+    # Re-reading from disk, as a second script would.
+    assert json.loads(path.read_text(encoding="utf-8"))["used"] == 3
+
+
+def test_yesterdays_spend_does_not_carry_over(tmp_path):
+    """Unused requests are lost at 00:00 UTC; the provider says so."""
+    path = tmp_path / "quota.json"
+    yesterday = dt.datetime(2026, 9, 3, 12, 0, tzinfo=dt.timezone.utc)
+    for _ in range(50):
+        injuries.record_call(path, now=yesterday)
+    today = dt.datetime(2026, 9, 4, 0, 30, tzinfo=dt.timezone.utc)
+    assert injuries.quota_state(path, now=today)["used"] == 0
+
+
+def test_a_spent_budget_is_a_hard_stop_not_a_warning(tmp_path):
+    path = tmp_path / "quota.json"
+    limit = config.INJURY_DAILY_QUOTA - config.INJURY_QUOTA_RESERVE
+    for _ in range(limit):
+        injuries.record_call(path)
+    with pytest.raises(injuries.QuotaExhausted, match="daily budget is spent"):
+        injuries.check_quota(path)
+
+
+def test_the_reserve_stops_short_of_the_published_limit(tmp_path):
+    """A few held back so a spent budget can still be diagnosed today."""
+    path = tmp_path / "quota.json"
+    for _ in range(config.INJURY_DAILY_QUOTA - config.INJURY_QUOTA_RESERVE):
+        injuries.record_call(path)
+    assert injuries.quota_state(path)["used"] < config.INJURY_DAILY_QUOTA
+
+
+def test_a_corrupt_counter_reads_as_spent_not_as_available(tmp_path):
+    """Zero is the wrong guess in exactly the dangerous direction."""
+    path = tmp_path / "quota.json"
+    path.write_text("{not json at all", encoding="utf-8")
+    with pytest.raises(injuries.QuotaExhausted):
+        injuries.check_quota(path)
+
+
+def test_a_cache_hit_costs_nothing(tmp_path):
+    """The budget is why the cache exists; a hit must not spend from it."""
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    quota = tmp_path / "quota.json"
+    payload = {"response": [], "paging": {"total": 1}}
+    (cache / "E0_2024.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    got = injuries.fetch_league(
+        "E0", 2024, cache, max_age_hours=float("inf"), quota_path=quota,
+    )
+    assert got == payload
+    assert injuries.quota_state(quota)["used"] == 0
+
+
+def test_no_request_is_attempted_once_the_budget_is_gone(tmp_path, monkeypatch):
+    """Refused before the socket opens, not after the server says no.
+
+    A request the server rejects still costs a request from a hundred.
+    """
+    quota = tmp_path / "quota.json"
+    for _ in range(config.INJURY_DAILY_QUOTA - config.INJURY_QUOTA_RESERVE):
+        injuries.record_call(quota)
+
+    def explode(*args, **kwargs):  # pragma: no cover - must never be reached
+        raise AssertionError("a request was made with no budget left")
+
+    monkeypatch.setattr(injuries.urllib.request, "urlopen", explode)
+    monkeypatch.setenv(config.INJURY_API_KEY_ENV, "a-key")
+    with pytest.raises(injuries.QuotaExhausted):
+        injuries.fetch_league("E0", 2024, tmp_path / "cache", quota_path=quota)
+
+
+def test_the_minute_limit_is_a_loop_that_terminates(monkeypatch):
+    """Ten a minute, and the throttle must not spin when sleep is stubbed."""
+    injuries._MINUTE_CALLS.clear()
+    slept = []
+    monkeypatch.setattr(injuries.time, "sleep", slept.append)
+    for _ in range(config.INJURY_CALLS_PER_MINUTE):
+        injuries._respect_minute_limit()
+    assert not slept
+    injuries._respect_minute_limit()
+    assert slept
+    injuries._MINUTE_CALLS.clear()
+
+
+def test_the_key_stays_optional(monkeypatch):
+    """No key must degrade the feature to absent, never break the pipeline."""
+    monkeypatch.delenv(config.INJURY_API_KEY_ENV, raising=False)
+    assert injuries.api_key() is None
+    with pytest.raises(injuries.MissingApiKey):
+        injuries.fetch_league("E0", 2024, Path("nowhere"), force=True)
