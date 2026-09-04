@@ -15,6 +15,7 @@ raise a warning without anyone having to think to look.
 
 from __future__ import annotations
 
+import datetime as dt
 import sys
 from pathlib import Path
 
@@ -139,3 +140,69 @@ def test_sources_are_empty_without_the_column():
     frame = pd.DataFrame({"date": ["2022-10-01"], "match_id": ["m1"]})
     assert evaluation.fair_line_sources(frame).empty
     assert evaluation.benchmark_changed(pd.DataFrame()) == []
+
+
+# ----------------------------------------------------------------------
+# Pinning the benchmark (BACKLOG B1)
+# ----------------------------------------------------------------------
+
+
+def _two_book_market() -> pd.DataFrame:
+    """One 1X2 market priced by Pinnacle and by a soft book."""
+    rows = []
+    for bookmaker, prices in (
+        ("pinnacle", (2.00, 3.40, 4.00)),
+        ("bet365", (1.90, 3.30, 3.80)),
+    ):
+        for selection, price in zip(("home", "draw", "away"), prices):
+            rows.append({
+                "market": "1x2", "selection": selection, "line": None,
+                "bookmaker": bookmaker, "phase": "close", "price": price,
+            })
+    return pd.DataFrame(rows)
+
+
+def test_naming_a_preference_alone_does_not_pin_the_benchmark():
+    """The bug, pinned so it cannot come back silently.
+
+    Asking for Pinnacle and getting bet365 wherever Pinnacle is quiet is a
+    *preference*, not a pin, and every CLV number compared across seasons on
+    that basis is measured against a moving ruler.
+    """
+    rows = _two_book_market()
+    only_soft = rows[rows["bookmaker"] == "bet365"]
+    out = backtest._market_probabilities(
+        only_soft, "shin", preference=("pinnacle",), fallback=True
+    )
+    assert out, "with fallback on, a soft book still answers"
+    assert {book for _, book in out.values()} == {"bet365"}
+
+
+def test_turning_the_fallback_off_really_pins_it():
+    rows = _two_book_market()
+    only_soft = rows[rows["bookmaker"] == "bet365"]
+    out = backtest._market_probabilities(
+        only_soft, "shin", preference=("pinnacle",), fallback=False
+    )
+    assert out == {}, "a pinned run must drop what the named book did not price"
+
+
+def test_a_pinned_run_still_uses_the_named_book_where_it_exists():
+    """Pinning must not throw away the matches it is supposed to measure."""
+    out = backtest._market_probabilities(
+        _two_book_market(), "shin", preference=("pinnacle",), fallback=False
+    )
+    assert {book for _, book in out.values()} == {"pinnacle"}
+    assert len(out) == 3
+
+
+def test_the_fallback_defaults_to_on_so_nothing_silently_narrows():
+    """Existing runs must keep their coverage; pinning is opt-in."""
+    assert backtest.BacktestConfig(
+        league="E0", start=dt.date(2024, 8, 1), end=dt.date(2025, 6, 1)
+    ).fair_line_fallback is True
+    out = backtest._market_probabilities(
+        _two_book_market()[lambda f: f["bookmaker"] == "bet365"],
+        "shin", preference=("pinnacle",),
+    )
+    assert out, "the default must behave as it always did"
