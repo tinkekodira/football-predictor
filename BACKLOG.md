@@ -82,20 +82,36 @@ belonging to leagues the run actually covered, the same scoped-delete shape as
 `fixtures.write_calendar` and `injuries.write_injuries`. Verified: a single-
 league run leaves the other four intact.
 
-## B3. No `.gitignore`, and build artifacts are tracked
+## B3. No `.gitignore`, and build artifacts are tracked — FIXED
 
-**Severity: medium — every commit needs hand-listed paths.**
+**Severity: medium — every commit needed hand-listed paths.**
 
-There is no `.gitignore`. Sixteen `.pyc` files and the 14 MB
-`data/football.duckdb` are tracked, so running anything at all dirties the tree
-and `git add -A` sweeps in bytecode churn plus a binary database. Every commit
-in this project is made with explicit paths for that reason.
-`data/football.duckdb.wal` now shows up untracked as well.
+**FIXED 2026-09-04.** There is now a `.gitignore`, and the sixteen `.pyc` files
+plus `data/football.duckdb` were untracked with `git rm --cached`, so nothing
+left anyone's disk and no history was rewritten.
 
-**Fix, and it needs a decision rather than a default:** ignore `__pycache__/`,
-`*.pyc`, `*.wal` and `data/raw/`, then `git rm --cached` the bytecode. Whether
-`data/football.duckdb` stays tracked is a real choice — it makes the repo
-self-contained and reproducible, at 14 MB a commit whenever it changes.
+**The database is no longer tracked**, and the deciding fact was not its size.
+The committed copy came from the *initial commit* and had never been updated:
+four tables against the working copy's eight, missing `fixtures`, `injuries`,
+`match_xg` and `match_lineups`. A fresh clone therefore got a database the home
+page could not open — repository weight *and* a misleading artifact. It is
+rebuilt by `scripts/build_database.py` in about two minutes.
+
+**The season CSVs stay tracked**, which is what makes that rebuild work with no
+network. They are ~8MB, effectively immutable once a season ends, and the one
+input that could not be regenerated if football-data.co.uk disappeared.
+`data/raw/crest_ids.json` stays for the same reason at a smaller scale: two
+kilobytes that otherwise cost requests from a 100-a-day allowance.
+
+**Club badges are ignored for a licensing reason, not a size one.** They are
+third-party club crests from a provider's CDN, and a public repository should
+not redistribute them. `crests.monogram` is why the app still looks finished
+without them.
+
+**The 13.5MB database blob from the initial commit remains in history.** Purging
+it needs `git filter-repo`, a rewrite of every commit hash and a force-push,
+which is disproportionate for a single blob on a solo repository — a deliberate
+choice, not an oversight.
 
 ## B4. Congestion features are computed and thrown away
 

@@ -1,0 +1,98 @@
+# What this repository does and does not carry.
+#
+# The rule: **track the small, immutable inputs; ignore the large, regenerable
+# outputs.** Every ignored path below can be rebuilt by a script in `scripts/`,
+# and every tracked path either cannot be, or is small enough that carrying it
+# is cheaper than the instructions to recreate it.
+
+# --------------------------------------------------------------------------
+# The database
+# --------------------------------------------------------------------------
+# Untracked as of 2026-09-04. It was tracked once, at the initial commit, and
+# never updated: the committed copy had four tables while the working copy had
+# eight, so a fresh clone got a database the home page could not open. That is
+# the worst of both worlds - repository weight *and* a misleading artifact.
+#
+# It is fully rebuildable: `scripts/build_database.py` takes about two minutes
+# from the season CSVs kept below, and build_xg / build_fixtures / build_rosters
+# / build_injuries add the rest. `scripts/make_sample_data.py` gets the app
+# running with no network at all.
+#
+# DuckDB files are binary and do not delta-compress, so each commit would store
+# a whole fresh copy - roughly 22MB a time, and it changes most sessions.
+data/football.duckdb
+data/*.duckdb
+# The write-ahead log. Present only while a connection is open, never wanted.
+data/*.wal
+
+# --------------------------------------------------------------------------
+# Downloaded caches
+# --------------------------------------------------------------------------
+# 161MB of Understat JSON and 17MB of injury payloads. Both are third-party API
+# responses: reproducible, large, and rewritten constantly. Re-downloading is
+# the slow part of a fresh setup (roughly 45 minutes for rosters), which is the
+# real cost of ignoring them - accepted deliberately.
+data/raw/understat/
+data/raw/injuries/
+
+# football-data.co.uk's upcoming-fixtures feed. A few days wide and rewritten
+# daily, unlike the season files below.
+data/raw/fixtures.csv
+
+# Club badges. Regenerable by `scripts/build_crests.py`, but the reason they
+# are ignored is not size (628KB) - it is that they are third-party club
+# crests fetched from a provider's CDN, and a public repository should not
+# redistribute them. `crests.monogram` means the app still looks finished
+# without them.
+data/crests/
+
+# Anything a run happens to write into `data/` that is not named above.
+data/sample/
+
+# --------------------------------------------------------------------------
+# Deliberately NOT ignored, so the reasoning survives
+# --------------------------------------------------------------------------
+# data/raw/<season>/*.csv - the football-data.co.uk season files, ~8MB in
+#   total. Small, effectively immutable once a season ends, and they are what
+#   makes `build_database.py` work offline. This is the one input that cannot
+#   be regenerated if the source ever disappears.
+# data/raw/crest_ids.json - a couple of kilobytes of team ids that otherwise
+#   cost API-Football requests from a 100-a-day allowance.
+
+# --------------------------------------------------------------------------
+# Python
+# --------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# --------------------------------------------------------------------------
+# Secrets and logs
+# --------------------------------------------------------------------------
+# No .env exists yet, and this is here so that stays true by accident as well
+# as on purpose. `FOOTBALL_API_KEY` is read from the environment for exactly
+# this reason - a key committed once is in the history for ever.
+.env
+.env.*
+!.env.example
+*.log
+
+# --------------------------------------------------------------------------
+# Editors and operating systems
+# --------------------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
