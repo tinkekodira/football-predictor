@@ -130,6 +130,13 @@ INJURY_LEAGUE_IDS: dict[str, int] = {
 # coming close to the limit.
 INJURY_CACHE_HOURS = 2
 
+# **The free plan caps the seasons it will serve.** Confirmed empirically:
+# 2024 returns 3,168 Premier League rows, the current season returns nothing.
+# That is not a bug and not a wrong league id, and the difference matters
+# because both look identical - an empty list. Anything asking for a season
+# past this on a free key should say so rather than shrug.
+INJURY_FREE_PLAN_LAST_SEASON = 2024
+
 # Seconds to wait between downloads. The site is a static file host and has no
 # published rate limit, but there is no reason to hammer it.
 REQUEST_DELAY_SECONDS = 1.5

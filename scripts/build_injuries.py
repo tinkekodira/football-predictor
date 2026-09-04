@@ -8,11 +8,16 @@ Needs a free key from https://www.api-football.com/ in the `FOOTBALL_API_KEY`
 environment variable. One request covers a whole league, so a full refresh of
 all five costs five of the free plan's hundred daily requests.
 
-**`--probe` prints the raw JSON for one league and writes nothing.** It exists
-because the parser in `fbedge.injuries` was written against the documented
-shape rather than against a live answer - the documentation is behind a login
-that refused an automated fetch. If a field has moved, probe first and fix the
-parser against what actually arrives, rather than trusting the table.
+**The free plan stops at the 2024 season.** Confirmed by probing: 2024 returns
+3,168 Premier League rows, the current season returns none. So a free key is
+enough to *study* injuries - 2022 to 2024 is real, per-fixture history - but
+not to show today's team news. That needs a paid plan.
+
+**`--probe` prints the raw JSON for one league and writes nothing.** The parser
+was originally written against the published schema because the documentation
+refused an automated fetch; it has since been confirmed against a real 2024
+response, and `test_the_parser_agrees_with_a_real_response` pins that entry
+verbatim. Probe again before trusting anything if the provider changes.
 
 **Unmatched club names are printed and the rows dropped.** The feed's team
 names are not the project's, and this project has been badly served once
@@ -90,6 +95,14 @@ def main() -> int:
         out = int(frame["ruled_out"].sum()) if not frame.empty else 0
         doubtful = int(frame["doubtful"].sum()) if not frame.empty else 0
         print(f"{league}: {len(frame)} entries ({out} out, {doubtful} doubtful)")
+        if not payload.get("response") and season > config.INJURY_FREE_PLAN_LAST_SEASON:
+            # An out-of-plan season and a genuinely quiet league both come back
+            # as an empty list, so say which this probably is.
+            print(
+                f"  ...and nothing came back. The free plan stops at "
+                f"{config.INJURY_FREE_PLAN_LAST_SEASON}; season {season} needs "
+                "a paid plan."
+            )
         if unmatched:
             all_unmatched[league] = unmatched
         if not frame.empty:
@@ -135,6 +148,15 @@ def probe(league: str, season: int, cache: Path, refresh: bool) -> int:
         print("\nfirst entry, in full:")
         print(json.dumps(entries[0], indent=2)[:2000])
         print("\nblocks present on the first entry:", sorted(entries[0]))
+    elif season > config.INJURY_FREE_PLAN_LAST_SEASON:
+        # An out-of-plan season and a genuinely quiet league both come back as
+        # an empty list, and only one of them is worth investigating.
+        print(
+            f"\nNothing came back, and season {season} is past the free plan's "
+            f"last ({config.INJURY_FREE_PLAN_LAST_SEASON}). On a free key that "
+            "is the expected answer, not a fault. Try "
+            f"--season {config.INJURY_FREE_PLAN_LAST_SEASON}."
+        )
     else:
         print(
             "\nThe feed returned no entries. That is plausible in a quiet week "

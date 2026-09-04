@@ -305,6 +305,19 @@ def fetch_league(
             "changed; see this module's docstring."
         )
 
+    # A league-season is thousands of rows - 3,168 for the Premier League in
+    # 2024 - and it arrives on one page today. If that ever stops being true,
+    # reading only page one would drop most of a league without a word, which
+    # is the exact failure this project keeps guarding against. Refuse instead.
+    paging = payload.get("paging") or {}
+    total_pages = int(paging.get("total") or 1)
+    if total_pages > 1:
+        raise InjuryFeedError(
+            f"{url} came back in {total_pages} pages and this reader only "
+            "fetches one, so most of the league would be missing. Add paging "
+            "before trusting anything from it."
+        )
+
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload), encoding="utf-8")
     time.sleep(config.REQUEST_DELAY_SECONDS)
@@ -439,8 +452,20 @@ def load_injuries(con, teams: list[str] | None = None) -> pd.DataFrame:
     return con.execute(f"SELECT * FROM {TABLE_NAME}").df()
 
 
-def for_teams(frame: pd.DataFrame, teams: list[str]) -> pd.DataFrame:
+def for_teams(
+    frame: pd.DataFrame,
+    teams: list[str],
+    on_date: dt.date | None = None,
+) -> pd.DataFrame:
     """Injuries for a set of teams, worst news first.
+
+    **`on_date` is not optional in practice.** The feed returns one row per
+    player *per fixture*, so a league-season is thousands of rows - 3,168 for
+    the Premier League in 2024. Without a date filter a team's panel would list
+    every absence of the entire season, including players who were back within
+    a fortnight, and it would look like a catastrophic injury crisis at every
+    club. Filtering on the fixture the row actually refers to is exact, because
+    the feed says which fixture it means.
 
     Ruled out before doubtful, because that is the order a reader cares about,
     and alphabetical within each so the list is stable between refreshes
@@ -449,6 +474,9 @@ def for_teams(frame: pd.DataFrame, teams: list[str]) -> pd.DataFrame:
     if frame.empty:
         return frame
     subset = frame[frame["team"].isin(teams)].copy()
+    if on_date is not None and "fixture_date" in subset.columns:
+        dates = pd.to_datetime(subset["fixture_date"], errors="coerce").dt.date
+        subset = subset[dates == on_date]
     if subset.empty:
         return subset
     return subset.sort_values(

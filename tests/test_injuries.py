@@ -341,3 +341,133 @@ def test_writing_nothing_still_creates_the_table(tmp_path):
     con = duckdb.connect(str(tmp_path / "t.duckdb"))
     assert injuries.write_injuries(con, pd.DataFrame()) == 0
     assert injuries.load_injuries(con).empty
+
+
+# ----------------------------------------------------------------------
+# The schema, as confirmed against a live response
+# ----------------------------------------------------------------------
+
+# Copied verbatim from `build_injuries.py --probe --league E0 --season 2024`.
+# Every other test in this file builds its own payload, which proves the parser
+# is self-consistent and nothing more; this one proves it agrees with the
+# provider. Do not tidy it - its value is that it was not written by hand.
+LIVE_ENTRY = {
+    "player": {
+        "id": 153434,
+        "name": "W. Fish",
+        "photo": "https://media.api-sports.io/football/players/153434.png",
+        "type": "Missing Fixture",
+        "reason": "Ankle Injury",
+    },
+    "team": {
+        "id": 33,
+        "name": "Manchester United",
+        "logo": "https://media.api-sports.io/football/teams/33.png",
+    },
+    "fixture": {
+        "id": 1208021,
+        "timezone": "UTC",
+        "date": "2024-08-16T19:00:00+00:00",
+        "timestamp": 1723834800,
+    },
+    "league": {
+        "id": 39,
+        "season": 2024,
+        "name": "Premier League",
+        "country": "England",
+        "logo": "https://media.api-sports.io/football/leagues/39.png",
+        "flag": "https://media.api-sports.io/flags/gb-eng.svg",
+    },
+}
+
+
+def test_the_parser_agrees_with_a_real_response():
+    """The one test here that could catch the provider changing under us."""
+    frame, unmatched = injuries.injury_frame(
+        response([LIVE_ENTRY]), "E0", 2024, known_teams={"Man United"}
+    )
+    assert unmatched == []
+    row = frame.iloc[0]
+    assert row["player"] == "W. Fish"
+    assert row["team"] == "Man United"       # feed says "Manchester United"
+    assert row["team_feed"] == "Manchester United"
+    assert row["status"] == "Missing Fixture"
+    assert row["reason"] == "Ankle Injury"
+    assert row["ruled_out"] and not row["doubtful"]
+    assert row["fixture_id"] == 1208021
+    assert row["fixture_date"] == dt.date(2024, 8, 16)
+
+
+def test_a_timezone_aware_fixture_date_lands_on_the_right_day():
+    """The feed sends `2024-08-16T19:00:00+00:00`. Losing the offset would move
+    late kick-offs onto the wrong day of the calendar."""
+    frame, _ = injuries.injury_frame(
+        response([LIVE_ENTRY]), "E0", 2024, {"Man United"}
+    )
+    assert frame.iloc[0]["fixture_date"] == dt.date(2024, 8, 16)
+
+
+# ----------------------------------------------------------------------
+# The two defects the live probe exposed
+# ----------------------------------------------------------------------
+
+
+def test_injuries_are_filtered_to_the_day_being_looked_at():
+    """A league-season is thousands of rows - 3,168 for the 2024 Premier League.
+
+    Without a date filter every club's panel would list its entire season of
+    absences at once and read as a permanent injury crisis.
+    """
+    frame, _ = injuries.injury_frame(
+        response([
+            entry("August Player", "Arsenal", fixture_id=1,
+                  date="2026-09-05T14:00:00+00:00"),
+            entry("Later Player", "Arsenal", fixture_id=2,
+                  date="2026-12-20T14:00:00+00:00"),
+        ]),
+        "E0", 2026, known_teams={"Arsenal"},
+    )
+    on_day = injuries.for_teams(frame, ["Arsenal"], on_date=dt.date(2026, 9, 5))
+    assert list(on_day["player"]) == ["August Player"]
+
+    # And without the filter, both come back - which is the bug, pinned.
+    assert len(injuries.for_teams(frame, ["Arsenal"])) == 2
+
+
+def test_a_date_with_no_entries_returns_nothing_rather_than_everything():
+    frame, _ = injuries.injury_frame(
+        response([entry("X", "Arsenal", date="2026-09-05T14:00:00+00:00")]),
+        "E0", 2026, {"Arsenal"},
+    )
+    assert injuries.for_teams(
+        frame, ["Arsenal"], on_date=dt.date(2026, 9, 6)
+    ).empty
+
+
+def test_a_paged_response_is_refused_rather_than_half_read(tmp_path, monkeypatch):
+    """The live response fits on one page today - 3,168 rows, paging total 1.
+
+    If that ever changes, reading only page one would drop most of a league
+    without a word, which is the exact shape of failure this project keeps
+    getting caught by.
+    """
+    payload = response([entry("X", "Arsenal")])
+    payload["paging"] = {"current": 1, "total": 4}
+
+    class FakeResponse:
+        def read(self):
+            return json.dumps(payload).encode("utf-8")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setenv(config.INJURY_API_KEY_ENV, "test-key")
+    monkeypatch.setattr(
+        injuries.urllib.request, "urlopen", lambda *a, **k: FakeResponse()
+    )
+    monkeypatch.setattr(injuries.time, "sleep", lambda *a: None)
+    with pytest.raises(injuries.InjuryFeedError, match="pages"):
+        injuries.fetch_league("E0", 2026, tmp_path, force=True)

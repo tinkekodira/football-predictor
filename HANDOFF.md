@@ -29,7 +29,7 @@ error, so they are worth knowing about before trusting a result:
 
 ## Current status
 
-- 367 tests passing (`python -m pytest`).
+- 372 tests passing (`python -m pytest`).
 - **The CLV measurement was broken, and is now fixed and re-baselined.** A
   benchmark change in 2024 plus favourite-longshot bias in multiplicative
   margin removal inflated every historical CLV figure. `margin_method` now
@@ -487,13 +487,43 @@ external dependency in the project**.
 - `scripts/build_injuries.py` loads it; `--probe` prints one league's raw
   response and writes nothing.
 
-**The parser was written against the documented shape, not a live answer.**
-API-Football's documentation returned HTTP 403 to an automated fetch and there
-is no key on this machine, so the field names come from the published schema
-and have **not** been confirmed against a real response. That is why `--probe`
-exists and why it is the first thing to run once a key is set. The fetch raises
-on any shape it does not recognise rather than returning nothing, so a wrong
-guess will announce itself instead of looking like a quiet week.
+**The schema is now confirmed against a live response**, and
+`test_the_parser_agrees_with_a_real_response` pins that entry verbatim - the
+only test in the file that could catch the provider changing rather than merely
+proving the parser self-consistent.
+
+**But the free plan stops at the 2024 season, and that is the headline.**
+Probing 2024 returns 3,168 Premier League rows; the current season returns
+none. Both look identical - an empty list - which is why
+`config.INJURY_FREE_PLAN_LAST_SEASON` exists and why the script now says which
+case it is. So a free key **cannot show today's team news**. It can do
+something else valuable, below.
+
+**Two real defects the live probe exposed, both now fixed:**
+
+1. **No date filter.** A league-season is thousands of rows because the feed
+   sends one per player *per fixture*. The panel would have listed a club's
+   entire season of absences at once and read as a permanent injury crisis.
+   `for_teams` now takes `on_date` and the page passes the day it is showing.
+2. **`paging` was ignored.** It is `{"current": 1, "total": 1}` today, so
+   everything fits on one page - but had that changed, the reader would have
+   silently taken a fraction of a league. It now refuses rather than
+   half-reads.
+
+Neither was findable without a real response, which is the argument for
+`--probe` over trusting a published schema.
+
+### What a free key is actually good for
+
+**Retesting the availability null with real injuries.** 2022 to 2024 is exactly
+the era the availability study covered, and the study's stated weakness was
+that Understat line-ups cannot separate an injury from a rested player
+(BACKLOG B6). This feed states the reason - "Ankle Injury" - per player per
+fixture. That turns a proxy into a measurement, and it is free.
+
+That is a genuine open question this now makes answerable, and it is worth more
+than the panel: the panel is decoration on a model with no edge, whereas the
+availability question is about whether a real signal was missed.
 
 **Nothing guesses a club name.** Matching is exact, then exact after a
 documented normalisation, then an explicit alias; anything left is printed and
@@ -504,9 +534,9 @@ never have been hit.
 
 ### Still needed for the page to be fully populated
 
-1. **A free API-Football key**, then `python scripts/build_injuries.py --probe
-   --league E0` to confirm the shape, then a normal run. Until then the injury
-   panel shows the setup step rather than pretending.
+1. **A paid API-Football plan** if the injury panel is to show current team
+   news at all; a free key stops at 2024. The code needs no change either way -
+   only the plan does.
 2. `python scripts/build_rosters.py --league E0` with the app stopped -
    `match_lineups` holds **83 rows**, so the availability panel currently has
    nothing to derive from. The earlier session's backfill cached 3,430 matches

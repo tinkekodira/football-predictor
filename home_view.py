@@ -427,22 +427,29 @@ def render_availability(day_frame: pd.DataFrame, db_path: str, day: dt.date) -> 
 
 
 @st.cache_data(ttl=900, show_spinner=False)
-def injuries_for_teams(db_path: str, teams: tuple[str, ...]) -> pd.DataFrame:
-    """Stored injuries for the teams playing on the selected day.
+def injuries_for_teams(
+    db_path: str, teams: tuple[str, ...], day: dt.date
+) -> pd.DataFrame:
+    """Stored injuries for the fixtures being played on the selected day.
 
     Reads the table rather than the feed: refreshing is
     `scripts/build_injuries.py`, which is rate-limited and deliberately not
     something a page render triggers.
+
+    The day is passed through to `for_teams` and matters more than it looks.
+    The feed sends one row per player per fixture, thousands per league-season,
+    so without it every club would appear to have its entire season of injuries
+    out at once.
     """
     con = get_connection(db_path)
     try:
         stored = injuries_mod.load_injuries(con, list(teams))
     except Exception:
         return pd.DataFrame()
-    return injuries_mod.for_teams(stored, list(teams))
+    return injuries_mod.for_teams(stored, list(teams), on_date=day)
 
 
-def render_injuries(day_frame: pd.DataFrame, db_path: str) -> None:
+def render_injuries(day_frame: pd.DataFrame, db_path: str, day: dt.date) -> None:
     """Real injury news for the teams playing, from the external feed."""
     st.markdown("#### Injury news")
     if day_frame.empty:
@@ -450,7 +457,7 @@ def render_injuries(day_frame: pd.DataFrame, db_path: str) -> None:
         return
 
     teams = tuple(sorted(set(day_frame["home_team"]) | set(day_frame["away_team"])))
-    news = injuries_for_teams(db_path, teams)
+    news = injuries_for_teams(db_path, teams, day)
 
     if news.empty:
         if injuries_mod.api_key() is None:
@@ -469,9 +476,11 @@ def render_injuries(day_frame: pd.DataFrame, db_path: str) -> None:
             )
         else:
             st.caption(
-                "A key is set but nothing is stored for these teams yet. Run "
-                "`python scripts/build_injuries.py` with the app stopped."
+                "A key is set but nothing is stored for these fixtures. Either "
+                "the feed has not been loaded yet, or it does not cover this "
+                "date - the free plan stops at the 2024 season."
             )
+            st.code("python scripts/build_injuries.py", language="bash")
         return
 
     stamp = injuries_mod.freshness(news)
@@ -549,6 +558,6 @@ def render(db_path: str, half_life: float) -> None:
     with right:
         render_highlights(prices, day)
         st.divider()
-        render_injuries(day_frame, db_path)
+        render_injuries(day_frame, db_path, day)
         st.divider()
         render_availability(day_frame, db_path, day)
