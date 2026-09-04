@@ -481,6 +481,62 @@ disagreement with the market, and the model's closing line value is still
 negative. Removing the rows where it is most obviously wrong does not make the
 remaining ones right. See the gate section at the top of `HANDOFF.md`.
 
+## B18. A database rebuild silently empties the two team-news tables
+
+**Severity: medium — two app panels went blank and nothing said so.**
+
+`scripts/build_database.py` rebuilds `matches`, `odds` and the rest from the
+tracked season CSVs in about two minutes, which is the whole reason the
+database is no longer tracked (B3). But `injuries` and `match_lineups` are not
+built from those CSVs — they come from API-Football and from Understat's
+per-match rosters — so a rebuild drops them and no step puts them back.
+
+**Confirmed on 2026-09-04.** After the B11 rebuild the database held eight
+tables and neither of those two was among them. The home page's availability
+and injury panels therefore derived from nothing, and looked exactly like a
+league with nobody injured.
+
+**Both were restored, and the cost was zero requests**, which is the part worth
+recording. The payloads were already on disk: `data/raw/injuries/` held eleven
+league-seasons (2022 and 2023 for all five leagues, plus `E0_2024`) and
+`data/raw/understat/matches/` held 3,430 cached rosters. `build_injuries.py`
+already handles the keyless case — `max_age_hours=inf` means "accept whatever
+is cached", which exists precisely so a caller with no key can work offline —
+so `--season 2022`, `2023`, `2024` reloaded **29,649 injury rows** and
+`build_rosters.py --league E0` reloaded **98,827 appearances over 3,440
+matches**. Neither needed the network beyond ten new roster files.
+
+**What would fix it properly** is for `build_database.py` to say what it has
+*not* rebuilt, rather than leaving a reader to discover it in the app. It knows
+which tables it writes; the ones it does not are enumerable. That is a print
+statement and a list, and it is not done.
+
+## B19. Eight club names in the injury feed match nothing and are dropped
+
+**Severity: low — visible, counted, and working as designed.**
+
+Reloading 2022 and 2023 printed eight unmatched clubs, which `injuries.py`
+drops rather than guesses:
+
+| season | league | feed name |
+|---|---|---|
+| 2022 | D1 | `Hamburger SV`, `Hertha Berlin` |
+| 2022 | F1 | `Clermont Foot`, `Estac Troyes` |
+| 2023 | E0 | `Sheffield Utd` |
+| 2023 | D1 | `SV Darmstadt 98` |
+| 2023 | F1 | `Clermont Foot`, `Saint Etienne` |
+
+This is the alias mechanism behaving correctly — nothing guesses a club name,
+and this project has been badly served once by a fuzzy matcher — but each is a
+real club whose rows are being lost. `Sheffield Utd` and `Hertha Berlin` are
+plainly Sheffield United and Hertha, so the fix is small; `Hamburger SV` in a
+2022 Bundesliga feed is the interesting one, because Hamburg were in the second
+tier that season and the row may be feed noise rather than a missing alias.
+
+**Each needs checking by eye before it goes in `injuries.TEAM_ALIASES`**, which
+is what that module's docstring asks for and why this is a backlog entry rather
+than a patch. `test_the_alias_table_is_injective` guards the table itself.
+
 ---
 
 ## Not bugs — open questions, kept here so they stay visible
