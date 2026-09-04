@@ -6,7 +6,7 @@ La Liga, Serie A, Bundesliga and Ligue 1.
 **Phases 1 to 4 are built.** Phase 1 is the data spine: it downloads a decade
 of real match data, normalises it, stores it and checks it. Phase 2 is the
 model: fitted team ratings that produce probabilities and fair prices for
-twenty markets from a single fit. Phase 3 is the part that decides whether any
+nineteen markets from a single fit. Phase 3 is the part that decides whether any
 of it is worth believing: a walk-forward backtest measuring calibration,
 closing line value and returns with honest confidence intervals. Phase 4 points
 the same machinery forwards, at fixtures that have not been played — and
@@ -280,7 +280,6 @@ show the per-league figure, never this table's range.
 | Winning margin | calibration only | 0.98–1.24 | 50,267 | no price exists |
 | Both teams to score | calibration only | **0.33–0.93** | 14,362 | no price exists |
 | Team goals (home/away) | calibration only | 0.95–1.08 | 43,086 | no price exists |
-| Odd/even goals | calibration only | **−2.41–1.54** | 14,362 | no price exists |
 | Half-time result | calibration only | 0.82–0.86 | 21,540 | no price exists |
 | Half-time goals | calibration only | 0.91–1.01 | 43,080 | no price exists |
 | Total corners | calibration only | 0.81–0.89 | 92,694 | no price exists |
@@ -291,20 +290,14 @@ show the per-league figure, never this table's range.
 | Card handicap | calibration only | 1.11–1.26 | 38,434 | no price exists |
 | Correct score | untested | — | — | no price exists |
 
-**Fifteen of a hundred market-league pairs are backtested.** The other
-eighty-five are modelled and checked and have never been bet into, and the app
-says so next to every one of them.
+**Fifteen of ninety-five market-league pairs are backtested.** The other eighty
+are modelled and checked and have never been bet into, and the app says so next
+to every one of them.
 
 Read the slope as: 1.0 is right, below 1 means the probabilities are spread too
-far apart, above 1 means they hedge towards the base rate. Three rows are worth
+far apart, above 1 means they hedge towards the base rate. Two rows are worth
 singling out because the numbers are unflattering and the table is not here to
 flatter:
-
-**Odd/even goals is noise.** The slope ranges from −2.41 to 1.54 across five
-leagues, and a negative slope means that in that league the model's confidence
-pointed the wrong way. That is the expected result — the parity of a total is
-close to a coin flip by construction and there is nothing there to know — and
-it is exactly why the market is labelled rather than quietly listed.
 
 **Both teams to score is over-confident**, at 0.33 to 0.93. The model separates
 fixtures on BTTS more sharply than the results justify, in every league.
@@ -314,6 +307,17 @@ written down in advance: it is derived by treating the two teams' card counts
 as independent, which overstates how much their *difference* scatters, so the
 prices sit too close to even money. `markets.count_difference` says so in its
 docstring, and the measurement agrees with the prediction.
+
+**One market was measured and then removed.** Odd/even total goals is trivially
+derivable from the score matrix, so it was priced. Its calibration slope came
+back between −2.41 and +1.54 across the five leagues — in at least one, the
+model's confidence pointed the wrong way — which is what a market close to a
+coin flip by construction looks like when a model has nothing to say about it.
+It was withdrawn on 2026-09-04 rather than kept with a warning label, because a
+market the model cannot rank is not worth the row it occupies. `evidence.py`
+still knows the name and reports it as withdrawn, so an old stored row is
+distinguishable from a market that simply has no data. That is the point of
+measuring: finding out what to stop doing counts as a result.
 
 ---
 

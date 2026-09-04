@@ -102,22 +102,6 @@ def draw_no_bet(matrix: np.ndarray) -> list[Selection]:
     ]
 
 
-def odd_even_goals(matrix: np.ndarray) -> list[Selection]:
-    """Whether the total is odd or even. 0-0 is even.
-
-    Included because it is free from the matrix, not because it is
-    interesting: it is close to a coin flip by construction and the model has
-    no particular reason to know which side of it a match falls.
-    """
-    size = matrix.shape[0]
-    totals = np.add.outer(np.arange(size), np.arange(size))
-    odd = float(matrix[totals % 2 == 1].sum())
-    return [
-        Selection("odd_even_goals", "odd", odd),
-        Selection("odd_even_goals", "even", 1.0 - odd),
-    ]
-
-
 def winning_margin(matrix: np.ndarray, max_margin: int = 3) -> list[Selection]:
     """Who wins and by how many, with the tail collapsed.
 
@@ -309,10 +293,6 @@ def price_selection(
         return next(
             (s for s in both_teams_to_score(matrix) if s.selection == selection), None
         )
-    if market == "odd_even_goals":
-        return next(
-            (s for s in odd_even_goals(matrix) if s.selection == selection), None
-        )
     if market == "winning_margin":
         return next(
             (s for s in winning_margin(matrix) if s.selection == selection), None
@@ -489,9 +469,14 @@ def all_goal_selections(
     for one of them to drift. `test_markets_are_mutually_consistent` asserts
     the arithmetic; this makes there be one place for it to hold.
 
-    Half-time markets are deliberately absent: they are not derivable from a
-    full-time matrix, because scoring rates are not uniform across the halves.
-    They come from their own fit. See `models/goals.py` and README.
+    Two markets are deliberately absent. **Half-time** is not derivable from a
+    full-time matrix, because scoring rates are not uniform across the halves;
+    it comes from its own fit. **Odd/even total goals** was priced here until
+    2026-09-04 and was removed after it was measured: its calibration slope ran
+    from -2.41 to +1.54 across five leagues, so in at least one the model's
+    confidence pointed the wrong way. That is the expected result for a market
+    that is close to a coin flip by construction, and a market the model cannot
+    rank is not worth the row it occupies. See BACKLOG B16.
     """
     out: list[Selection] = []
     out += match_odds(matrix)
@@ -500,7 +485,6 @@ def all_goal_selections(
     out += total_goals(matrix, goal_lines)
     out += both_teams_to_score(matrix)
     out += team_totals(matrix, team_goal_lines)
-    out += odd_even_goals(matrix)
     out += winning_margin(matrix)
     for line in handicap_lines:
         out += asian_handicap(matrix, line)

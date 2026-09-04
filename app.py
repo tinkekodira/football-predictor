@@ -223,7 +223,6 @@ def render_forecast(db_path, prof, league, as_of, half_life, ridge,
         show("btts")
         show("home_goals")
         show("away_goals")
-        show("odd_even_goals")
     with market_tabs[2]:
         if forecast.market("1x2_ht"):
             st.caption(

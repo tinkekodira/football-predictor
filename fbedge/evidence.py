@@ -60,6 +60,18 @@ BACKTESTED = "backtested"
 CALIBRATION_ONLY = "calibration-only"
 UNTESTED = "untested"
 
+# Markets this project priced, measured, and then stopped pricing. Kept by name
+# so a stored evidence row from before the removal is reported as withdrawn
+# rather than as a market that simply has no data - those are different, and
+# only one of them is a reason to go looking for a bug.
+WITHDRAWN_MARKETS = {
+    "odd_even_goals": (
+        "withdrawn 2026-09-04: calibration slope ran -2.41 to +1.54 across five "
+        "leagues, so the model could not rank this market at all. Close to a "
+        "coin flip by construction. See BACKLOG B16."
+    ),
+}
+
 # The markets the source prices, and therefore the only ones that can carry a
 # closing line value figure. Read from the backtest rather than restated, so
 # the two cannot disagree about what is bettable.
@@ -82,7 +94,6 @@ NO_PRICE_REASON = {
     "draw_no_bet": "the source publishes no draw-no-bet price",
     "home_goals": "the source publishes no team-total price",
     "away_goals": "the source publishes no team-total price",
-    "odd_even_goals": "the source publishes no odd/even price",
     "winning_margin": "the source publishes no winning-margin price",
     "correct_score": "the source publishes no correct-score price",
     "1x2_ht": "the source publishes no half-time price",
@@ -90,12 +101,19 @@ NO_PRICE_REASON = {
 }
 
 
+WITHDRAWN = "withdrawn"
+
+
 def status(market: str, row: pd.Series | None = None) -> str:
-    """Which of the three a market is, given whatever evidence exists.
+    """Which of the four a market is, given whatever evidence exists.
 
     A priced market with no evidence row is still `untested` - the price
-    existing is not the same as somebody having measured against it.
+    existing is not the same as somebody having measured against it. A
+    withdrawn market outranks everything else, because it is no longer priced
+    and any row describing it is a leftover.
     """
+    if market in WITHDRAWN_MARKETS:
+        return WITHDRAWN
     if row is None or int(row.get("n", 0) or 0) == 0:
         return UNTESTED
     if market in PRICED_MARKETS and int(row.get("n_bets", 0) or 0) > 0:
@@ -278,6 +296,8 @@ def describe(market: str, row: pd.Series | None) -> str:
     says so in the first three words rather than in a footnote.
     """
     state = status(market, row)
+    if state == WITHDRAWN:
+        return f"WITHDRAWN - {WITHDRAWN_MARKETS[market]}"
     if state == UNTESTED:
         reason = NO_PRICE_REASON.get(market)
         if reason:
@@ -340,7 +360,9 @@ def short_labels(frame: pd.DataFrame, markets_wanted=None) -> dict[str, str]:
     for market in wanted:
         row = indexed.loc[market] if market in indexed.index else None
         state = status(market, row)
-        if state == UNTESTED:
+        if state == WITHDRAWN:
+            out[market] = "withdrawn, not priced"
+        elif state == UNTESTED:
             out[market] = "untested"
         elif state == CALIBRATION_ONLY:
             slope = row.get("calibration_slope")

@@ -65,9 +65,7 @@ def test_the_matrix_is_a_probability_distribution(matrix):
 # Markets that must sum to one
 # --------------------------------------------------------------------------
 
-@pytest.mark.parametrize(
-    "market", ["1x2", "btts", "odd_even_goals", "winning_margin"]
-)
+@pytest.mark.parametrize("market", ["1x2", "btts", "winning_margin"])
 def test_complete_markets_sum_to_one(selections, market):
     total = sum(
         s.probability for key, s in selections.items() if key[0] == market
@@ -221,6 +219,26 @@ def test_price_selection_reads_the_handicap_line_from_the_backed_side(matrix):
 # --------------------------------------------------------------------------
 # The exception, stated as a test
 # --------------------------------------------------------------------------
+
+def test_a_withdrawn_market_is_not_priced_and_cannot_be_settled(matrix):
+    """odd/even goals was measured, found unrankable, and removed.
+
+    Its calibration slope ran -2.41 to +1.54 across five leagues, so in at
+    least one the model's confidence pointed the wrong way. Pinned because the
+    market is trivially cheap to derive from the matrix and would otherwise be
+    re-added by somebody enumerating what a score matrix can produce.
+    """
+    from fbedge import settlement
+
+    assert not hasattr(markets, "odd_even_goals")
+    assert markets.price_selection(matrix, "odd_even_goals", "odd", None) is None
+    assert not any(
+        s.market == "odd_even_goals" for s in markets.all_goal_selections(matrix)
+    )
+    # A stored row from before the removal must fail loudly, not settle.
+    with pytest.raises(ValueError, match="was removed on 2026-09-04"):
+        settlement.settle("odd_even_goals", "odd", None, 2, 1)
+
 
 def test_half_time_markets_are_not_derivable_from_the_full_time_matrix(matrix):
     """The guard against the worst of the three options.

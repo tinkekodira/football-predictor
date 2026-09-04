@@ -129,7 +129,6 @@ class FixturePrediction:
             ("Draw no bet", "draw_no_bet"),
             ("Winning margin", "winning_margin"),
             ("Total goals", "total_goals"),
-            ("Odd / even goals", "odd_even_goals"),
             ("Home team goals", "home_goals"),
             ("Away team goals", "away_goals"),
             ("Both teams to score", "btts"),

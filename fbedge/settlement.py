@@ -80,16 +80,6 @@ def settle_draw_no_bet(selection: str, home_goals: int, away_goals: int) -> Sett
     return WON if selection == winner else LOST
 
 
-def settle_odd_even(selection: str, total: int) -> Settlement:
-    """Odd or even total. Zero is even."""
-    odd = int(total) % 2 == 1
-    if selection == "odd":
-        return WON if odd else LOST
-    if selection == "even":
-        return LOST if odd else WON
-    raise ValueError(f"Unknown odd/even selection {selection!r}")
-
-
 def settle_winning_margin(
     selection: str, home_goals: int, away_goals: int, max_margin: int = 3
 ) -> Settlement:
@@ -215,8 +205,6 @@ def settle(
         return settle_draw_no_bet(selection, home_goals, away_goals)
     if market == "btts":
         return settle_btts(selection, home_goals, away_goals)
-    if market == "odd_even_goals":
-        return settle_odd_even(selection, home_goals + away_goals)
     if market == "winning_margin":
         return settle_winning_margin(selection, home_goals, away_goals)
     if market == "total_goals":
@@ -273,4 +261,12 @@ def settle(
     if market == "correct_score":
         expected = f"{home_goals}-{away_goals}"
         return WON if selection == expected else LOST
+    if market == "odd_even_goals":
+        raise ValueError(
+            "odd_even_goals was removed on 2026-09-04 after measurement: its "
+            "calibration slope ran -2.41 to +1.54 across five leagues, so the "
+            "model could not rank it. This row predates the removal. Re-run "
+            "scripts/build_evidence.py rather than reinstating the market; see "
+            "BACKLOG B16."
+        )
     raise ValueError(f"No settlement rule for market {market!r}")

@@ -82,9 +82,14 @@ BETTABLE_MARKETS = ("1x2", "total_goals", "asian_handicap")
 # Markets scored for calibration only: priced from the model's own lines,
 # settled against the result, and given no price at all so they can never
 # become bets. See `BacktestConfig.calibration_markets`.
+#
+# `odd_even_goals` was here and was removed on 2026-09-04. Scoring it was what
+# established there was nothing to score: slope -2.41 to +1.54 across five
+# leagues. Measuring a market is how you find out it is not worth pricing, and
+# then you stop pricing it. BACKLOG B16.
 DEFAULT_CALIBRATION_MARKETS = (
     "1x2", "double_chance", "draw_no_bet", "btts", "total_goals",
-    "home_goals", "away_goals", "odd_even_goals", "winning_margin",
+    "home_goals", "away_goals", "winning_margin",
     "asian_handicap", "total_corners", "total_cards",
     "home_total_corners", "away_total_corners", "corner_handicap",
     "home_total_cards", "away_total_cards", "card_handicap",

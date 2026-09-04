@@ -394,6 +394,47 @@ The alternative - versioning the hash so a parser change is visible as a
 parser change - is the proper fix and is not worth it for a solo archive that
 has changed schema once.
 
+## B16. Odd/even total goals was priced, measured and withdrawn — DONE
+
+**Severity: none. A result, recorded so it is not undone.**
+
+Odd/even is two lines of arithmetic off the score matrix, so it was added in
+Phase 4 along with the other cheap derivations. `scripts/build_evidence.py`
+then scored it, and the answer was unambiguous:
+
+| league | calibration slope |
+|---|---|
+| E0 | 0.18 |
+| SP1 | -2.41 |
+| I1 | -0.05 |
+| D1 | 1.54 |
+| F1 | 0.69 |
+
+A slope of 1.0 is correct calibration. **A negative slope means the model's
+confidence pointed the wrong way**: in La Liga and Serie A, fixtures it called
+likelier to be odd came in even slightly more often. Across five leagues the
+estimates do not agree on a sign, let alone a size.
+
+That is not a defect and there is nothing to fix. The parity of a total is
+close to a coin flip by construction: it flips on any single goal, so it
+depends on the exact shape of the scoring distribution rather than on anything
+team strength determines. The model has no reason to know it, and the
+measurement says it does not.
+
+**Removed on 2026-09-04**, rather than kept behind a warning label. A market the
+model cannot rank is not worth the row it occupies on a page, and the project's
+own standard is that a number and its evidence appear together — the evidence
+here says "do not read this", which is a reason to delete the number.
+
+**What survives.** `evidence.WITHDRAWN_MARKETS` keeps the name and the reason,
+so an evidence row stored before the removal reports as *withdrawn* rather than
+as a market with no data — those look identical otherwise, and only one of them
+is a reason to go bug-hunting. `settlement.settle` raises with the same
+explanation rather than silently failing to match. And
+`test_a_withdrawn_market_is_not_priced_and_cannot_be_settled` pins it, because
+this is exactly the kind of two-line derivation somebody re-adds while
+enumerating what a score matrix can produce.
+
 ---
 
 ## Not bugs — open questions, kept here so they stay visible
