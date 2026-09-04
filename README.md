@@ -539,6 +539,22 @@ python scripts/scan_fixtures.py --record     # file today's board
 python scripts/paper_trade.py                # settle it, and read the record
 ```
 
+**On Windows, `scripts/weekly_task.xml` schedules it.** Import it once:
+
+```
+schtasks /create /xml scripts\weekly_task.xml /tn "football-edge weekly"
+```
+
+Its times are **local** (Central European), and that is the trap worth naming:
+the source states its deadlines in British time, which is always one hour
+behind Central European time - both regions change clocks on the same dates -
+so 17:30 local is 16:30 British all year, winter included. Each trigger then
+repeats every 30 minutes for four hours, because the source rebuilds its file
+"not later than" its deadline, and a single run at a fixed moment can easily
+read the file that is about to be replaced. Repeating costs nothing: every step
+deduplicates. Output goes to `data/logs/weekly.log`, and a run that fires while
+the app is open does nothing and says so, because DuckDB allows one writer.
+
 **Run `weekly.py` on the source's own cadence** — Friday before 17:00 British
 time, Tuesday before 13:00 — because the price file is overwritten each time it
 is rebuilt and a Friday missed is a week of forward evidence that cannot be

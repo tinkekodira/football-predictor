@@ -717,6 +717,30 @@ cannot be rebuilt. `weekly.py` now exports only when `--db` resolves to the
 configured database, and says so when it does not. Skipped rather than
 redirected: a test run has no business producing a backup at all.
 
+### Scheduling it, and the timezone trap
+
+`scripts/weekly_task.xml` is a Task Scheduler definition, imported with
+`schtasks /create /xml scripts\weekly_task.xml /tn "football-edge weekly"`.
+
+**Its times are local, and the conversion is not the obvious one.** The source
+states its deadlines in British time and this machine is Central European, so
+17:30 local is 16:30 British - and that holds all year, because the UK and
+central Europe change their clocks on the same dates. A schedule written in
+British time on a CET machine would run an hour early every week and nothing
+would ever say so.
+
+**Each trigger repeats every 30 minutes for four hours, and that is the
+important part.** The source rebuilds its file "not later than" 17:00 and 13:00
+British time, so a single run at a fixed moment has a good chance of reading the
+file that is about to be replaced rather than the one that replaced it. The
+repetition brackets the deadline. It costs nothing because every step
+deduplicates - which is exactly what makes this routine schedulable at all.
+
+Verified by running the task's own command string, not merely the script: four
+steps green in eleven seconds against the real database, writing to
+`data/logs/weekly.log`. `cmd /c` with nested quotes is fragile enough to be
+worth testing rather than reasoning about.
+
 ### The B15 notice was firing on every claim, every run
 
 The first live run printed "329 repeats came from a different revision" and
