@@ -15,13 +15,14 @@ actually has:
   the disagreement with the market is shown too - but football-data.co.uk only
   publishes odds a few days ahead, so for most future dates there is no market
   to disagree with, and the panel says so rather than implying an edge.
-- **Availability** is derived, not reported. There is no injury feed in this
-  project. What `fbedge.availability` can say is which regular starters have
-  been missing from recent line-ups, computed from matches already played.
-  That is a real signal and an honest one, and it is *not* news: it cannot
-  know about an injury picked up in training this morning.
-- **News** has no source at all. The panel says so instead of being filled
-  with something that looks like news and is not.
+- **Injury news** is real reporting, from the external feed in
+  `fbedge.injuries` - the one keyed source in the project. It shows who is out
+  and who is doubtful, with the reason, and it says how old the feed reading
+  is, because a stale injury list is worse than none: it looks current.
+- **Availability** is the derived second opinion, kept alongside rather than
+  replaced by the feed. `fbedge.availability` counts regular starters absent
+  from recent line-ups, which is a different claim - it sees rotation the feed
+  never reports, and misses this morning's news the feed has.
 """
 
 from __future__ import annotations
@@ -32,6 +33,7 @@ import pandas as pd
 import streamlit as st
 
 from fbedge import availability as availability_mod
+from fbedge import injuries as injuries_mod
 from fbedge import config, database, fixtures as fixtures_mod, markets
 from fbedge import predict as predict_mod
 from fbedge.models import base as model_base
@@ -424,12 +426,85 @@ def render_availability(day_frame: pd.DataFrame, db_path: str, day: dt.date) -> 
     )
 
 
-def render_news() -> None:
-    st.markdown("#### News")
+@st.cache_data(ttl=900, show_spinner=False)
+def injuries_for_teams(db_path: str, teams: tuple[str, ...]) -> pd.DataFrame:
+    """Stored injuries for the teams playing on the selected day.
+
+    Reads the table rather than the feed: refreshing is
+    `scripts/build_injuries.py`, which is rate-limited and deliberately not
+    something a page render triggers.
+    """
+    con = get_connection(db_path)
+    try:
+        stored = injuries_mod.load_injuries(con, list(teams))
+    except Exception:
+        return pd.DataFrame()
+    return injuries_mod.for_teams(stored, list(teams))
+
+
+def render_injuries(day_frame: pd.DataFrame, db_path: str) -> None:
+    """Real injury news for the teams playing, from the external feed."""
+    st.markdown("#### Injury news")
+    if day_frame.empty:
+        st.caption("No fixtures to check.")
+        return
+
+    teams = tuple(sorted(set(day_frame["home_team"]) | set(day_frame["away_team"])))
+    news = injuries_for_teams(db_path, teams)
+
+    if news.empty:
+        if injuries_mod.api_key() is None:
+            st.caption(
+                "No injury feed configured. It is the one source here that "
+                "needs a key - nobody publishes injuries free and open."
+            )
+            st.code(
+                'setx FOOTBALL_API_KEY "your-key"\n'
+                "python scripts/build_injuries.py",
+                language="bash",
+            )
+            st.caption(
+                "Free key, no card, from api-football.com. One request covers a "
+                "league, so a full refresh costs five of the daily hundred."
+            )
+        else:
+            st.caption(
+                "A key is set but nothing is stored for these teams yet. Run "
+                "`python scripts/build_injuries.py` with the app stopped."
+            )
+        return
+
+    stamp = injuries_mod.freshness(news)
+    if stamp is not None:
+        age = dt.datetime.now() - stamp
+        hours = age.total_seconds() / 3600
+        # Say how old it is rather than implying it is live. A stale injury
+        # list is worse than none, because it looks current.
+        when = (f"{int(hours)}h ago" if hours >= 1
+                else f"{int(age.total_seconds() // 60)}m ago")
+        st.caption(f"Feed last read {when}.")
+
+    for team in [t for t in teams if t in set(news["team"])]:
+        block = news[news["team"] == team]
+        out = block[block["ruled_out"]]
+        doubtful = block[block["doubtful"]]
+        st.markdown(f"**{team}**")
+        for _, row in out.head(6).iterrows():
+            reason = f" - {row['reason']}" if row["reason"] else ""
+            st.caption(f"OUT: {row['player']}{reason}")
+        for _, row in doubtful.head(4).iterrows():
+            reason = f" - {row['reason']}" if row["reason"] else ""
+            st.caption(f"Doubtful: {row['player']}{reason}")
+        # A club with rows but neither flag set means the feed used a status
+        # word this project has not seen; show it rather than dropping it.
+        other = block[~block["ruled_out"] & ~block["doubtful"]]
+        for _, row in other.head(3).iterrows():
+            st.caption(f"{row['status'] or 'Unavailable'}: {row['player']}")
+
     st.caption(
-        "No news source is wired into this project. Adding one means picking a "
-        "feed and accepting its terms; nothing here will invent headlines in "
-        "the meantime."
+        "Third-party feed: exactly as current and as correct as its provider. "
+        "Knowing who is injured is not an edge - the market reads the same "
+        "feeds, usually sooner."
     )
 
 
@@ -474,6 +549,6 @@ def render(db_path: str, half_life: float) -> None:
     with right:
         render_highlights(prices, day)
         st.divider()
-        render_availability(day_frame, db_path, day)
+        render_injuries(day_frame, db_path)
         st.divider()
-        render_news()
+        render_availability(day_frame, db_path, day)

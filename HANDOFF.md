@@ -29,7 +29,7 @@ error, so they are worth knowing about before trusting a result:
 
 ## Current status
 
-- 341 tests passing (`python -m pytest`).
+- 367 tests passing (`python -m pytest`).
 - **The CLV measurement was broken, and is now fixed and re-baselined.** A
   benchmark change in 2024 plus favourite-longshot bias in multiplicative
   margin removal inflated every historical CLV figure. `margin_method` now
@@ -471,13 +471,47 @@ none was invented.**
 - **News** says it has no source. Filling it with something that looked like
   news would have been the worst available outcome.
 
+### Real injury news, added after the first pass
+
+The first version of this page had no injury panel worth the name, because no
+source existed. One does now: `fbedge/injuries.py`, and it is **the only keyed
+external dependency in the project**.
+
+- **Provider: API-Football** (`v3.football.api-sports.io/injuries`). Chosen
+  because it is addressed by *league and season*, so five requests refresh all
+  five leagues against a free allowance of a hundred a day. The alternative
+  looked at, Big Balls Sports Data, offers a larger quota but is addressed per
+  player id, which would mean building a player-id mapping first.
+- `FOOTBALL_API_KEY` in the environment, never in a tracked file - this repo
+  still has no `.gitignore` (BACKLOG B3).
+- `scripts/build_injuries.py` loads it; `--probe` prints one league's raw
+  response and writes nothing.
+
+**The parser was written against the documented shape, not a live answer.**
+API-Football's documentation returned HTTP 403 to an automated fetch and there
+is no key on this machine, so the field names come from the published schema
+and have **not** been confirmed against a real response. That is why `--probe`
+exists and why it is the first thing to run once a key is set. The fetch raises
+on any shape it does not recognise rather than returning nothing, so a wrong
+guess will announce itself instead of looking like a quiet week.
+
+**Nothing guesses a club name.** Matching is exact, then exact after a
+documented normalisation, then an explicit alias; anything left is printed and
+the row dropped. `test_the_alias_table_is_injective` earned its place
+immediately by catching twelve alias keys - `'fc barcelona'`, `'ac milan'`,
+`'as roma'` and others - that normalise to something else and could therefore
+never have been hit.
+
 ### Still needed for the page to be fully populated
 
-1. `python scripts/build_rosters.py --league E0` with the app stopped -
+1. **A free API-Football key**, then `python scripts/build_injuries.py --probe
+   --league E0` to confirm the shape, then a normal run. Until then the injury
+   panel shows the setup step rather than pretending.
+2. `python scripts/build_rosters.py --league E0` with the app stopped -
    `match_lineups` holds **83 rows**, so the availability panel currently has
    nothing to derive from. The earlier session's backfill cached 3,430 matches
    but the write never landed.
-2. Odds for upcoming fixtures stop at the football-data horizon of about three
+3. Odds for upcoming fixtures stop at the football-data horizon of about three
    days, so most future dates carry no market comparison at all.
 
 ## What was added in the hierarchical session

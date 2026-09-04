@@ -98,6 +98,38 @@ FIXTURES_URL = "https://www.football-data.co.uk/fixtures.csv"
 
 USER_AGENT = "football-edge/0.1 (personal analytics project)"
 
+# --------------------------------------------------------------------------
+# Injury feed
+# --------------------------------------------------------------------------
+# The only genuinely external, keyed dependency in the project. Everything
+# else here is a public file or a public JSON endpoint; injuries are not
+# published free by anyone without a signup, so this one needs a key and
+# degrades to "no data" without it rather than failing.
+
+INJURY_API_URL = "https://v3.football.api-sports.io/injuries"
+
+# Read from the environment rather than stored: a key in a tracked file is a
+# key in the history for ever, and this repository has no .gitignore.
+INJURY_API_KEY_ENV = "FOOTBALL_API_KEY"
+
+# API-Football's own competition ids, which are unrelated to the
+# football-data.co.uk division codes used everywhere else. Kept here rather
+# than inline so that a wrong id is fixable in one place - and it is the kind
+# of thing that is wrong silently, returning an empty list for a league that
+# simply has a different number.
+INJURY_LEAGUE_IDS: dict[str, int] = {
+    "E0": 39,    # Premier League
+    "SP1": 140,  # La Liga
+    "I1": 135,   # Serie A
+    "D1": 78,    # Bundesliga
+    "F1": 61,    # Ligue 1
+}
+
+# The free plan allows 100 requests a day and one call covers a whole league,
+# so five calls refresh everything. Two hours keeps a matchday current without
+# coming close to the limit.
+INJURY_CACHE_HOURS = 2
+
 # Seconds to wait between downloads. The site is a static file host and has no
 # published rate limit, but there is no reason to hammer it.
 REQUEST_DELAY_SECONDS = 1.5
