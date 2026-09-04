@@ -125,6 +125,7 @@ fbedge/
   profile.py     the descriptive fixture card
   fixtures.py    the season calendar, played and unplayed
   injuries.py    the external injury feed (needs an API key)
+  crests.py      club badges, downloaded once and inlined
   models/
     base.py      time decay, ridge priors, point-in-time training sets
     goals.py     Dixon-Coles: attack, defence, home advantage, low-score fix

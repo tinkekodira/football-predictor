@@ -25,7 +25,7 @@ import pandas as pd
 import streamlit as st
 
 from fbedge import backtest as backtest_mod
-from fbedge import config, database, evaluation, markets, normalize
+from fbedge import config, crests, database, evaluation, markets, normalize
 from fbedge import predict as predict_mod
 from fbedge import profile as profile_mod
 from fbedge.models import base as model_base
@@ -449,9 +449,20 @@ if st.session_state.get("view", "home") == "home":
     st.stop()
 
 opened = st.session_state.get("match", {})
-if st.sidebar.button("< Back to calendar", width="stretch"):
+
+
+def _back_to_calendar() -> None:
     st.session_state["view"] = "home"
-    st.rerun()
+
+
+# Kept in the sidebar *and* at the top of the page. The sidebar copy is where a
+# returning user looks; the page copy is what somebody who has just clicked in
+# from the calendar actually sees, and without it the only way back looked like
+# the browser button.
+st.sidebar.button(
+    "Back to calendar", width="stretch", on_click=_back_to_calendar,
+    icon=":material/arrow_back:",
+)
 
 league_names = options.drop_duplicates("league").set_index("league")["league_name"]
 _league_codes = league_names.index.tolist()
@@ -575,7 +586,21 @@ prof = profile_mod.fixture_profile(
     as_of=as_of, league=league, season_start_year=int(season_start_year),
 )
 
-st.title(f"{prof.home_team} vs {prof.away_team}")
+_back_column, _title_column = st.columns([1, 6])
+with _back_column:
+    st.button(
+        "Back", width="stretch", type="primary", key="back_top",
+        on_click=_back_to_calendar, icon=":material/arrow_back:",
+        help="Return to the fixture calendar",
+    )
+with _title_column:
+    st.markdown(
+        f"<h1 style='margin:0;padding-top:2px'>"
+        f"{crests.img_tag(prof.home_team, 34)}{prof.home_team}"
+        f"<span style='opacity:0.45'> vs </span>"
+        f"{crests.img_tag(prof.away_team, 34)}{prof.away_team}</h1>",
+        unsafe_allow_html=True,
+    )
 st.caption(
     f"{prof.league_name} | {prof.season} | using matches played before "
     f"{prof.as_of.strftime('%d %B %Y')}"

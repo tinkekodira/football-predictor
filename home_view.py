@@ -34,7 +34,8 @@ import streamlit as st
 
 from fbedge import availability as availability_mod
 from fbedge import injuries as injuries_mod
-from fbedge import config, database, fixtures as fixtures_mod, markets
+from fbedge import config, crests as crests_mod, database
+from fbedge import fixtures as fixtures_mod, markets
 from fbedge import predict as predict_mod
 from fbedge.models import base as model_base
 
@@ -269,7 +270,16 @@ def render_matches(day_frame: pd.DataFrame, prices: pd.DataFrame) -> None:
                 else:
                     st.markdown(f"**{row['kickoff_local'].strftime('%H:%M')}**")
             with columns[1]:
-                st.write(f"{row['home_team']}  -  {row['away_team']}")
+                # One HTML string rather than four Streamlit elements: a badge
+                # belongs on the same line as its club, and image elements are
+                # blocks that would each claim a row of their own.
+                st.markdown(
+                    f"<div style='padding-top:2px'>"
+                    f"{crests_mod.labelled(row['home_team'])}"
+                    f"<span style='opacity:0.5;margin:0 8px'>v</span>"
+                    f"{crests_mod.labelled(row['away_team'])}</div>",
+                    unsafe_allow_html=True,
+                )
             with columns[2]:
                 if row["played"] and pd.notna(row["home_goals"]):
                     st.markdown(
@@ -320,7 +330,12 @@ def render_highlights(prices: pd.DataFrame, day: dt.date) -> None:
     top = pool.sort_values("confidence", ascending=False).head(4)
 
     for _, row in top.iterrows():
-        st.markdown(f"**{row['home_team']} v {row['away_team']}**")
+        st.markdown(
+            f"{crests_mod.img_tag(row['home_team'], 18)}"
+            f"<b>{row['home_team']} v {row['away_team']}</b>"
+            f"{crests_mod.img_tag(row['away_team'], 18)}",
+            unsafe_allow_html=True,
+        )
         st.caption(
             f"{config.LEAGUES.get(row['league'], row['league'])}  -  model makes "
             f"**{row['pick']}** {row['confidence']:.0%}, with "

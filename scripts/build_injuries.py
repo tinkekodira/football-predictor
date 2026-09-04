@@ -59,18 +59,24 @@ def main() -> int:
     leagues = args.leagues or ([args.league] if args.league
                                else fixtures.default_leagues())
 
-    if injuries.api_key() is None:
+    # No key is not the same as nothing to do: a league already downloaded can
+    # still be loaded from its cache. Refusing the whole run because part of it
+    # is blocked is the same mistake as letting a league go silently missing.
+    keyless = injuries.api_key() is None
+    if keyless:
         print(
-            f"No {config.INJURY_API_KEY_ENV} set, so there is nothing to fetch.\n"
+            f"No {config.INJURY_API_KEY_ENV} set, so nothing new can be "
+            "fetched. Loading whatever is already cached.\n"
             "\n"
             "  1. Sign up free at https://www.api-football.com/ (no card).\n"
             "  2. Copy the key from the dashboard.\n"
             f"  3. setx {config.INJURY_API_KEY_ENV} \"your-key\"  "
             "then open a new terminal.\n"
             "\n"
-            "The free plan allows 100 requests a day; a full refresh costs five."
+            "The free plan allows 100 requests a day, a full refresh costs "
+            f"five, and it serves seasons up to "
+            f"{config.INJURY_FREE_PLAN_LAST_SEASON}.\n"
         )
-        return 1
 
     if args.probe:
         return probe(leagues[0], season, args.cache, args.refresh)
@@ -85,8 +91,16 @@ def main() -> int:
     for league in leagues:
         try:
             payload = injuries.fetch_league(
-                league, season, args.cache, force=args.refresh
+                league, season, args.cache, force=args.refresh,
+                # Without a key, accept a cached payload of any age rather than
+                # declaring it stale and then failing to refresh it.
+                max_age_hours=(
+                    float("inf") if keyless else config.INJURY_CACHE_HOURS
+                ),
             )
+        except injuries.MissingApiKey:
+            print(f"{league}: nothing cached and no key, so skipped.")
+            continue
         except injuries.InjuryFeedError as error:
             print(f"{league}: {error}")
             continue

@@ -29,7 +29,7 @@ error, so they are worth knowing about before trusting a result:
 
 ## Current status
 
-- 372 tests passing (`python -m pytest`).
+- 396 tests passing (`python -m pytest`).
 - **The CLV measurement was broken, and is now fixed and re-baselined.** A
   benchmark change in 2024 plus favourite-longshot bias in multiplicative
   margin removal inflated every historical CLV figure. `margin_method` now
@@ -47,6 +47,11 @@ error, so they are worth knowing about before trusting a result:
   coefficients carry the predicted sign in all six specifications and none
   reaches two standard errors; turning it on moves log loss by 0.00004. See the
   availability section for what that does and does not rule out.
+- **That null is now under challenge.** Retested with real injury data instead
+  of the line-up proxy, *newly* missing players are worth about **-7% on the
+  scoring rate each** (z = -2.67) while the count of everyone currently out is
+  worth nothing - exactly the split the "the model has already adapted"
+  argument predicted. One season of one league so far. See the retest section.
 - **Fitting the shrinkage instead of choosing it was built, measured and
   rejected.** Empirical Bayes says the ridge should be 11-13, not 1; applied, it
   costs 0.008 log loss and loses on 4 of 4 held-out leagues, with the
@@ -409,6 +414,80 @@ beatable.
 
 ---
 
+## The availability retest: the first result that looks like a real signal
+
+`scripts/injury_signal.py`, on real injury data rather than the line-up proxy.
+**This is one season of one league and must not be believed yet**, but it is
+the most promising number this project has produced, and the reason it appeared
+is a mechanism decided before the run rather than found in the output.
+
+### What changed, and why it was predicted in advance
+
+The first pass counted **everyone currently unavailable** and found nothing:
+`beta_own` +0.011 and -0.003, both indistinguishable from zero. The mean was
+**3.9 players out per side**, which is the clue. A player out for the season
+appears in every fixture, and by the third of them the model has already
+adapted - the team's recent results were produced without him, so the fitted
+rate carries his absence already. Counting him again asks the model to subtract
+the same player twice.
+
+So the feature was changed to **newly** unavailable - out today, playing last
+time - which is the same reasoning as the absence window in
+`fbedge/availability.py`. That was decided from the 3.9 figure, before the
+result was seen.
+
+### E0, 2024/25, 343-359 matches
+
+| specification | mean out/side | beta_own | z | beta_opp | z |
+|---|---|---|---|---|---|
+| **newly out** | 0.88 | **-0.057** | **-1.81** | +0.012 | +0.35 |
+| **newly out or doubtful** | 0.97 | **-0.077** | **-2.67** | +0.002 | +0.06 |
+| all currently out | 3.90 | +0.011 | +0.62 | +0.027 | +1.48 |
+| all currently out or doubtful | 4.33 | -0.003 | -0.21 | +0.022 | +1.36 |
+
+**-7.7% on the scoring rate per newly missing player**, clearing two standard
+errors, on one season. For scale, that is larger than the goals/xG blend and
+the shrinkage change put together - those bought 0.0033 of log loss between
+them. The prediction split the two specifications exactly as the mechanism said
+it would: the state is noise, the change is signal.
+
+`beta_opp` is flat in both new specifications, which is *different* from the
+original availability study and worth understanding rather than glossing: a
+weakened opponent does not appear to concede more, only to score less.
+
+### Why this is not yet a result
+
+- **One season, one league.** 343 matches. The free plan covers 2022-2024 for
+  all five leagues, so this can be roughly fifteen times larger for fourteen
+  more requests. Nothing should be built until it is.
+- **Four specifications were run and the best is quoted.** The ordering
+  protects it - the mechanism was argued from the 3.9 mean before the split was
+  measured - but two of the four are close relatives, so treat z = -2.67 as
+  weaker than it looks.
+- **It is an effect, not an edge.** The feed's rows are attached to fixtures
+  and the endpoint does not say when each row came into existence. A "Missing
+  Fixture" row is confirmed by the line-up, which is published about an hour
+  before kick-off and after the price. This measures whether absences move
+  scoring, which is a question the project had open; it does not establish the
+  information was ever tradeable.
+- **Relapses are undercounted on purpose.** The feed only emits rows when
+  somebody is unavailable, so a date with none is either "everyone fit" or "no
+  fixture", and those cannot be separated from injuries alone. The undercount
+  biases towards finding less signal, which is the right way to err here.
+
+### The next run, and it is cheap
+
+```
+python scripts/build_injuries.py --season 2023
+python scripts/build_injuries.py --season 2022
+python scripts/injury_signal.py --league E0 --from 2022-08-01 --to 2025-06-01
+```
+
+Ten requests, then the same for the other four leagues. If -7% survives on
+16,000 matches across five leagues, it is the first thing in this project worth
+building on. If it does not, it was one season of noise and the availability
+null stands.
+
 ## What was added in the home-page session (most recent)
 
 A calendar home page, in the shape of a live-scores site: scroll a date, see
@@ -532,11 +611,38 @@ immediately by catching twelve alias keys - `'fc barcelona'`, `'ac milan'`,
 `'as roma'` and others - that normalise to something else and could therefore
 never have been hit.
 
+### Club badges, and why they work when the injury data does not
+
+`fbedge/crests.py` plus `scripts/build_crests.py`. The useful discovery:
+**`media.api-sports.io` is a public image CDN** - fetching a badge sends no
+key, verified directly. So badges keep working on a free plan even though the
+same provider's injury data is capped at 2024. Only the *id lookup* needs a
+key, and the ids are cached in `data/raw/crest_ids.json` so it is paid once.
+
+- **16 badges already exist with no key at all**, harvested from the team ids
+  sitting inside the cached `E0_2024.json` injury probe. Every injury row names
+  its club and carries its id.
+- The remaining 80 need one run of `scripts/build_crests.py` with the key.
+  It fetches the five leagues *and their second tiers*, because a club promoted
+  this summer was in a second tier last season.
+- Badges are resized to 48px on download and inlined as data URIs. The
+  originals are ~90KB; a Saturday shows 22 fixtures, so hotlinking or storing
+  full size would put four megabytes of PNG on one page.
+
+Alternatives ruled out: **TheSportsDB** free tier returns the same 24 dummy
+teams for every league id, and caps `search_all_teams` at 10 - unusable.
+
+A missing badge renders as nothing at all, never a placeholder or a broken
+image, because promotion means missing badges are a normal state.
+
 ### Still needed for the page to be fully populated
 
 1. **A paid API-Football plan** if the injury panel is to show current team
    news at all; a free key stops at 2024. The code needs no change either way -
    only the plan does.
+2. **One run of `scripts/build_crests.py`** with a free key, to get the other
+   80 club badges. Costs about ten requests, once, and never again for a club
+   whose id is cached.
 2. `python scripts/build_rosters.py --league E0` with the app stopped -
    `match_lineups` holds **83 rows**, so the availability panel currently has
    nothing to derive from. The earlier session's backfill cached 3,430 matches

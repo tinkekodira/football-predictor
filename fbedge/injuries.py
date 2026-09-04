@@ -39,6 +39,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from . import config
@@ -224,6 +225,11 @@ def _cache_path(cache_dir: Path, league: str, season: int) -> Path:
 def _is_stale(path: Path, max_age_hours: float, now: dt.datetime | None = None) -> bool:
     if not path.exists():
         return True
+    # An infinite budget means "any cache will do", which is how a caller with
+    # no API key asks to work from whatever is already on disk. `timedelta`
+    # cannot represent it, so answer before constructing one.
+    if not np.isfinite(max_age_hours):
+        return False
     age = (now or dt.datetime.now()) - dt.datetime.fromtimestamp(path.stat().st_mtime)
     return age > dt.timedelta(hours=max_age_hours)
 
