@@ -29,7 +29,7 @@ error, so they are worth knowing about before trusting a result:
 
 ## Current status
 
-- 396 tests passing (`python -m pytest`).
+- 402 tests passing (`python -m pytest`).
 - **The CLV measurement was broken, and is now fixed and re-baselined.** A
   benchmark change in 2024 plus favourite-longshot bias in multiplicative
   margin removal inflated every historical CLV figure. `margin_method` now
@@ -632,8 +632,14 @@ key, and the ids are cached in `data/raw/crest_ids.json` so it is paid once.
 Alternatives ruled out: **TheSportsDB** free tier returns the same 24 dummy
 teams for every league id, and caps `search_all_teams` at 10 - unusable.
 
-A missing badge renders as nothing at all, never a placeholder or a broken
-image, because promotion means missing badges are a normal state.
+**A club with no badge gets a generated monogram**, a flat disc of initials
+drawn as inline SVG. That reverses the first version of this file, which
+rendered nothing so a gap would read as a shorter name rather than a broken
+image. Correct at a handful missing; wrong at **80 of 96**, which is where a
+free key leaves you - the page read as half-built. The stand-in needs no
+network and no licence, cannot be mistaken for a real crest, and is replaced
+automatically when `build_crests.py` fetches the genuine one. `crests.missing`
+still reports those clubs, so the cosmetic fix does not hide the real gap.
 
 ### Still needed for the page to be fully populated
 

@@ -1,9 +1,9 @@
 """Tests for club badges.
 
-The property worth pinning is that a **missing** badge is invisible rather than
-broken. Promotion happens every summer, so a club with no badge on disk is a
-normal state, not a fault, and the page has to look deliberate when it happens
-instead of showing a torn-image icon.
+The property worth pinning is that a **missing** badge is a deliberate stand-in
+rather than a gap or a broken image. Promotion happens every summer, so a club
+with no badge on disk is a permanent normal state, not a fault - and with a
+free API key it is 80 clubs of 96.
 
 The slug tests exist because football-data club names contain apostrophes -
 `Nott'm Forest`, `M'gladbach` - which are legal in a filename on Linux and a
@@ -64,18 +64,52 @@ def test_slug_never_returns_an_empty_filename():
 # ----------------------------------------------------------------------
 
 
-def test_a_club_with_no_badge_renders_as_nothing(badge_dir):
-    """Not a placeholder and not a broken image: a row with a missing badge
-    should read as a row with a slightly shorter name."""
-    assert crests.img_tag("Elversberg", base=str(badge_dir)) == ""
+def test_a_club_with_no_badge_gets_a_monogram(badge_dir):
+    """Reversed from an earlier version of this file, on purpose.
+
+    Rendering nothing is right when a handful of badges are missing and wrong
+    when most are, which is where a free API key leaves you: 80 of 96. A flat
+    disc of initials reads as a deliberate stand-in; a gap reads as unfinished.
+    """
     assert crests.data_uri("Elversberg", str(badge_dir)) is None
     assert crests.path_for("Elversberg", badge_dir) is None
+    tag = crests.img_tag("Elversberg", base=str(badge_dir))
+    assert "svg+xml" in tag
+
+
+def test_the_monogram_can_still_be_turned_off(badge_dir):
+    """Somewhere a stand-in would mislead, the old behaviour is a flag away."""
+    assert crests.img_tag("Elversberg", base=str(badge_dir), fallback=False) == ""
 
 
 def test_a_club_with_no_badge_still_shows_its_name(badge_dir):
     rendered = crests.labelled("Elversberg", base=str(badge_dir))
     assert "Elversberg" in rendered
-    assert "<img" not in rendered
+
+
+def test_initials_survive_the_apostrophes_in_real_club_names(badge_dir):
+    """Splitting on the apostrophe gives `Nott` and `m`, so the second initial
+    becomes M. Removing it first is what makes these read correctly."""
+    assert crests.initials("Nott'm Forest") == "NF"
+    assert crests.initials("M'gladbach") == "MG"
+    assert crests.initials("Real Madrid") == "RM"
+    assert crests.initials("Liverpool") == "LI"
+
+
+def test_a_monogram_is_the_same_colour_on_every_run():
+    """`hash()` is salted per process, so a club would change colour on every
+    restart. The digest is what keeps it stable."""
+    assert crests.monogram("Real Madrid") == crests.monogram("Real Madrid")
+
+
+def test_two_clubs_are_not_forced_to_share_a_colour():
+    assert crests.monogram("Real Madrid") != crests.monogram("Barcelona")
+
+
+def test_only_the_generated_disc_is_rounded(badge_dir):
+    """A real badge is square with transparent corners; a 50% radius clips it."""
+    assert "border-radius" not in crests.img_tag("Liverpool", base=str(badge_dir))
+    assert "border-radius" in crests.img_tag("Elversberg", base=str(badge_dir))
 
 
 def test_a_club_with_a_badge_gets_an_inline_image(badge_dir):
@@ -99,6 +133,12 @@ def test_the_requested_size_is_honoured(badge_dir):
 # ----------------------------------------------------------------------
 # Coverage reporting
 # ----------------------------------------------------------------------
+
+
+def test_missing_still_reports_clubs_that_only_have_a_monogram(badge_dir):
+    """The stand-in must not make a gap invisible to the build script - it is
+    cosmetic, and `build_crests.py` still has real work to do."""
+    assert "Elversberg" in crests.missing(["Liverpool", "Elversberg"], badge_dir)
 
 
 def test_missing_lists_only_the_clubs_without_a_badge(badge_dir):
