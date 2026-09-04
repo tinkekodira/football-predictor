@@ -538,6 +538,66 @@ def test_stakes_are_flat_and_the_summary_reports_clv_before_profit(clean, played
     assert "mean_clv" in summary and "clv_se" in summary
 
 
+def test_two_model_configurations_are_never_pooled(clean, played):
+    """A changed default starts a second experiment; it does not spoil the first.
+
+    Provenance is part of a claim's identity, so nothing already recorded is
+    corrupted. What would corrupt the *answer* is averaging the two arms into
+    one closing line value and reading it as though one model produced it -
+    which is BACKLOG B1 exactly, a benchmark that moved mid-window with the
+    pooled figure quietly describing two instruments.
+    """
+    other = ledger.Provenance(**{**PROVENANCE.__dict__, "ridge": 5.0})
+    ledger.record(clean, ledger.build_claims(frame_of(scan_row(played)), PROVENANCE))
+    ledger.record(clean, ledger.build_claims(
+        frame_of(scan_row(played, ridge=5.0)), other))
+
+    summary = ledger.summary(clean)
+    assert summary["provenances"] == 2
+    assert summary["mixed"] is True
+
+    arms = ledger.by_provenance(clean)
+    assert len(arms) == 2
+    assert set(arms["ridge"]) == {1.0, 5.0}
+    # Each arm counts only its own claims.
+    assert list(arms["bets"]) == [1, 1]
+
+
+def test_one_configuration_is_not_reported_as_mixed(clean, played):
+    """The ordinary case must not trip the guard, or the guard gets ignored."""
+    for price in (2.10, 2.30, 2.50):
+        ledger.record(clean, ledger.build_claims(
+            frame_of(scan_row(played, price_taken=price)), PROVENANCE))
+
+    summary = ledger.summary(clean)
+    assert summary["bets"] == 3
+    assert summary["provenances"] == 1
+    assert summary["mixed"] is False
+    assert len(ledger.by_provenance(clean)) == 1
+
+
+def test_the_report_refuses_to_print_a_pooled_figure_for_a_mixed_ledger(
+    clean, played, capsys
+):
+    """The number a reader would otherwise take away is the one to withhold."""
+    from scripts import paper_trade
+
+    other = ledger.Provenance(**{**PROVENANCE.__dict__, "ridge": 5.0})
+    ledger.record(clean, ledger.build_claims(frame_of(scan_row(played)), PROVENANCE))
+    ledger.record(clean, ledger.build_claims(
+        frame_of(scan_row(played, ridge=5.0)), other))
+    ledger.settle_open(clean)
+
+    paper_trade.report(clean, None)
+    out = capsys.readouterr().out
+
+    assert "MIXED LEDGER" in out
+    assert "2 model configurations" in out
+    assert "must be read separately" in out
+    # The pooled headline is absent, which is the whole point.
+    assert "Closing line value - the headline measure" not in out
+
+
 def test_the_summary_of_an_empty_ledger_says_so_rather_than_dividing_by_zero(clean):
     summary = ledger.summary(clean)
     assert summary["bets"] == 0

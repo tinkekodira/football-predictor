@@ -82,6 +82,10 @@ def render(db_path: str) -> None:
         )
         return
 
+    if summary["mixed"]:
+        _render_mixed(db_path, leagues, summary)
+        return
+
     _render_headline(summary)
     st.divider()
 
@@ -106,6 +110,46 @@ def render(db_path: str) -> None:
         "closing line value is negative and has been for nine seasons, which "
         "is the strongest evidence available that the disagreement is the "
         "model's error rather than the market's."
+    )
+
+
+def _render_mixed(db_path: str, leagues: tuple[str, ...], summary: dict) -> None:
+    """More than one model configuration on file, so no pooled headline.
+
+    **Two provenances is two experiments.** Provenance is part of a claim's
+    identity, so a changed default does not corrupt what is already recorded -
+    it starts a second run beside the first. What would corrupt the *answer* is
+    averaging them into one closing line value and reading it as though a
+    single model produced it, which is BACKLOG B1 exactly: a benchmark that
+    moved mid-window, with the pooled figure quietly describing two
+    instruments.
+
+    So the page shows the arms and declines to combine them. Not an error - a
+    second arm may well be deliberate - but never one number.
+    """
+    con = _connection(db_path)
+    st.error(
+        f"**This ledger holds {summary['provenances']} model configurations.** "
+        "They are separate experiments and are shown separately: a single "
+        "pooled closing line value across them would describe no model that "
+        "ever existed. Provenance is part of a claim's identity, so nothing "
+        "recorded has been corrupted — but nothing here can be read as one "
+        "measurement either."
+    )
+    st.markdown("#### Model configurations on file")
+    arms = ledger.by_provenance(con, leagues=list(leagues) if leagues else None)
+    show = [
+        "target", "ridge", "half_life_days", "min_matches", "max_ev",
+        "bets", "staked", "settled", "n_clv", "mean_clv", "clv_se",
+        "first_recorded",
+    ]
+    st.dataframe(
+        arms[show].style.format({"mean_clv": "{:+.3%}", "clv_se": "{:.3%}"}),
+        width="stretch", hide_index=True,
+    )
+    st.caption(
+        "To go back to one experiment, either restore the earlier settings or "
+        "start a fresh ledger and treat the arms above as separate records."
     )
 
 

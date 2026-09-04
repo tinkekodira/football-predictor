@@ -157,6 +157,28 @@ def report(con, leagues) -> None:
           f"last {summary['last_recorded']}.")
     print()
 
+    # **A mixed ledger never gets a pooled headline.** Two provenances is two
+    # experiments, and averaging them into one closing line value is the defect
+    # BACKLOG B1 describes - a benchmark that changed mid-window, with the
+    # pooled figure quietly describing two instruments.
+    if summary["mixed"]:
+        print(f"  MIXED LEDGER: {summary['provenances']} model configurations "
+              "on file.")
+        print("  " + "-" * (width - 4))
+        arms = ledger.by_provenance(con, leagues=leagues)
+        show = ["target", "ridge", "half_life_days", "min_matches", "max_ev",
+                "bets", "settled", "n_clv", "mean_clv", "clv_se"]
+        print(arms[show].to_string(index=False))
+        print()
+        print(
+            "  These are separate experiments and must be read separately. A\n"
+            "  single pooled figure across them would describe no model that\n"
+            "  ever existed. Nothing recorded is wrong: provenance is part of a\n"
+            "  claim's identity, so the arms never contaminated each other."
+        )
+        print()
+        return
+
     if not summary.get("n_clv"):
         print("  No settled bet carries a closing price yet, so there is no")
         print("  closing line value to report. That is the expected state of a")

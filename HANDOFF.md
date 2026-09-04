@@ -65,7 +65,7 @@ weeks, judge on the CLV from *that* period - is unchanged.
 
 ## Current status
 
-- 611 tests passing, 1 skipped (`python -m pytest`).
+- 619 tests passing, 1 skipped (`python -m pytest`).
 - **A paper-trading ledger exists, and it is the first thing here that
   accumulates evidence going forward rather than backward.** The standing rule
   has always been "paper-trade for several weeks and judge it on the CLV from
@@ -716,6 +716,33 @@ database - would silently overwrite the tracked backup of the one table that
 cannot be rebuilt. `weekly.py` now exports only when `--db` resolves to the
 configured database, and says so when it does not. Skipped rather than
 redirected: a test run has no business producing a backup at all.
+
+### Guarding the experiment against ourselves
+
+A forward measurement is only a measurement while the instrument holds still,
+and the person most likely to move it is whoever is working on the model. Two
+guards, both added while the first fixtures were still unplayed.
+
+**Reports never pool a mixed ledger.** `ledger.by_provenance` returns one row
+per model configuration and `summary` carries `provenances` and `mixed`. When
+more than one is present, `paper_trade.report` and the app tab both show the
+arms and withhold the pooled headline. Provenance is part of a claim's
+identity, so a changed default never corrupts what is already recorded - it
+starts a second experiment beside the first. What *would* corrupt the answer is
+averaging them and reading it as one model, which is B1 exactly.
+
+**`tests/test_frozen_defaults.py` pins the eight provenance values**, so
+changing one fails the suite until somebody edits the test in the same commit.
+That converts an accidental drift into a deliberate act with a diff attached.
+It also asserts the frozen list and `Provenance.key` cover the same eight
+facts, so the pin cannot protect something the ledger does not record; and it
+checks the live ledger still holds exactly one configuration.
+
+**Two of the eight are worse than the rest**, and the test says so:
+`margin_method` and `FAIR_LINE_PREFERENCE` feed `closing_fair`, which is
+computed at *settlement* time rather than at record time. Changing either would
+rewrite the closing line value of bets already sitting in the ledger unsettled.
+Everything else only affects claims filed after the change.
 
 ### Scheduling it, and the timezone trap
 

@@ -878,7 +878,15 @@ def summary(con, leagues: list[str] | None = None) -> dict:
 
     staked = frame[frame["staked"]]
     settled = staked[staked["match_id"].notna()]
+    # **How many experiments are in here.** Anything above one means the
+    # figures below average two different models, and every caller is expected
+    # to say so rather than print a pooled headline. See `by_provenance`.
+    arms = int(
+        frame[PROVENANCE_COLUMNS].drop_duplicates().shape[0]
+    ) if not frame.empty else 0
     out = {
+        "provenances": arms,
+        "mixed": arms > 1,
         "bets": int(len(frame)),
         "staked": int(len(staked)),
         "withheld": int((~frame["staked"]).sum()),
@@ -920,6 +928,65 @@ def summary(con, leagues: list[str] | None = None) -> dict:
             }
         )
     return out
+
+
+#: The columns that together say which model made a claim. A ledger holding
+#: more than one distinct combination of these is not one experiment, it is
+#: two, and pooling them is the defect BACKLOG B1 and B10 both describe.
+PROVENANCE_COLUMNS = [
+    "target", "blend_weight", "ridge", "half_life_days",
+    "margin_method", "price_source", "min_matches", "max_ev",
+]
+
+
+def by_provenance(con, leagues: list[str] | None = None) -> pd.DataFrame:
+    """One row per model configuration in the ledger, never pooled.
+
+    **A forward measurement is only a measurement while the instrument holds
+    still.** Provenance is part of a claim's identity, so changing a default
+    does not corrupt the claims already filed - it starts a second experiment
+    alongside the first. What would corrupt the *answer* is averaging the two
+    into one closing line value and reading it as though one model produced it.
+    That is exactly the shape of B1, where a benchmark changed mid-window and
+    the pooled figure quietly described two instruments.
+
+    So this is the honest view, and `summary` reports how many rows it has.
+    Two rows is not an error; two rows read as one number is.
+    """
+    from . import evaluation
+
+    frame = load_bets(con, leagues=leagues)
+    if frame.empty:
+        return pd.DataFrame(columns=PROVENANCE_COLUMNS + [
+            "bets", "staked", "settled", "n_clv", "n_matches", "mean_clv",
+            "clv_se", "first_recorded", "last_recorded",
+        ])
+
+    rows = []
+    for values, block in frame.groupby(PROVENANCE_COLUMNS, dropna=False):
+        staked = block[block["staked"]]
+        settled = staked[staked["match_id"].notna()]
+        clv = settled.dropna(subset=["clv"])
+        stats = (
+            evaluation.clustered_mean(clv["clv"], clv["match_id"])
+            if not clv.empty
+            else {"n": 0, "n_clusters": 0, "mean": np.nan, "se": np.nan}
+        )
+        rows.append(
+            {
+                **dict(zip(PROVENANCE_COLUMNS, values)),
+                "bets": int(len(block)),
+                "staked": int(len(staked)),
+                "settled": int(len(settled)),
+                "n_clv": stats["n"],
+                "n_matches": stats["n_clusters"],
+                "mean_clv": stats["mean"],
+                "clv_se": stats["se"],
+                "first_recorded": block["recorded_at_utc"].min(),
+                "last_recorded": block["recorded_at_utc"].max(),
+            }
+        )
+    return pd.DataFrame(rows).sort_values("first_recorded").reset_index(drop=True)
 
 
 def withheld_comparison(con, leagues: list[str] | None = None) -> pd.DataFrame:
