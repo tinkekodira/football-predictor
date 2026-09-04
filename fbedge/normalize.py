@@ -124,7 +124,7 @@ BOOKMAKERS: dict[str, str] = {
     "LB": "ladbrokes",
     "PP": "paddy_power",
     "CL": "coral",
-    "SK": "skybet",
+    "SKB": "skybet",
     "BF": "betfair_sportsbook",
     "BFD": "betfred",
     "IW": "interwetten",
@@ -140,8 +140,16 @@ BOOKMAKERS: dict[str, str] = {
 
 # Which prefixes ever carried totals and handicap prices. The rest are 1X2
 # only, and generating columns for them would just be dead weight.
-TOTALS_PREFIXES = ("P", "B365", "Max", "Avg", "GB")
-HANDICAP_PREFIXES = ("P", "B365", "Max", "Avg", "GB", "LB")
+#
+# **BFE was missing from both lists until 2026-09-04, and it mattered.** The
+# source has carried `BFE>2.5`/`BFE<2.5` and `BFEAHH`/`BFEAHA` since 2024/25,
+# and Betfair Exchange heads `backtest.FAIR_LINE_PREFERENCE` precisely because
+# an exchange's overround is a fraction of a bookmaker's. Leaving it out of
+# these two tuples meant the sharpest available benchmark was silently dropped
+# for totals and handicaps while being used for 1X2, so a single backtest
+# measured two markets against two different instruments. See BACKLOG B10.
+TOTALS_PREFIXES = ("P", "B365", "Max", "Avg", "GB", "BFE")
+HANDICAP_PREFIXES = ("P", "B365", "Max", "Avg", "GB", "LB", "BFE")
 
 # Bookmaker-specific handicap line columns, preferred over the market-wide
 # AHh when present, because a book's own line is what its prices refer to.
@@ -578,12 +586,30 @@ def extract_odds(raw: pd.DataFrame, matches: pd.DataFrame) -> pd.DataFrame:
         )
 
     df = raw.copy().reset_index(drop=True)
-    df.columns = [str(c).strip() for c in df.columns]
 
     # Select exactly the raw rows that survived filtering, in the same order
     # as the canonical matches frame.
     df = df.loc[matches["source_row"].to_numpy()].reset_index(drop=True)
-    keys = matches[["match_id"]].reset_index(drop=True)
+    return odds_long(df, matches["match_id"].reset_index(drop=True))
+
+
+def odds_long(
+    raw: pd.DataFrame, keys: pd.Series, key_name: str = "match_id"
+) -> pd.DataFrame:
+    """Reshape wide odds columns into long rows, keyed by whatever you supply.
+
+    Split out of `extract_odds` so the Phase 4 fixture snapshots can reuse it
+    verbatim. `fixtures.csv` uses exactly the same column conventions as a
+    season file but has no results and therefore no `match_id`, so its rows are
+    keyed by a content hash instead. Two readers of the same wide format would
+    drift apart - the away-handicap sign alone is a bug this project has
+    already paid for once - so there is only one.
+
+    `raw` must already be row-aligned with `keys`.
+    """
+    df = raw.copy().reset_index(drop=True)
+    df.columns = [str(c).strip() for c in df.columns]
+    keys = pd.Series(keys).reset_index(drop=True)
 
     records: list[pd.DataFrame] = []
 
@@ -591,10 +617,18 @@ def extract_odds(raw: pd.DataFrame, matches: pd.DataFrame) -> pd.DataFrame:
             negate_line=False):
         if price_col not in df.columns:
             return
+        # A handicap price whose line column is absent is not a price: nothing
+        # can settle "home at 1.95" without knowing the start. Storing it with
+        # a NULL line put ~98,500 unsettleable rows into the odds table, about
+        # a third of it - `price_selection` returns None for them, so they were
+        # dead weight rather than a wrong number, but a spec asking for a line
+        # column the file does not have should produce nothing. See BACKLOG B11.
+        if line_col is not None and line_col not in df.columns:
+            return
         price = pd.to_numeric(df[price_col], errors="coerce")
         frame = pd.DataFrame(
             {
-                "match_id": keys["match_id"],
+                key_name: keys,
                 "bookmaker": bookmaker,
                 "phase": phase,
                 "market": market,
@@ -630,23 +664,20 @@ def extract_odds(raw: pd.DataFrame, matches: pd.DataFrame) -> pd.DataFrame:
             line_col=line_col, negate_line=True,
         )
 
+    columns = [key_name, "bookmaker", "phase", "market", "selection", "line", "price"]
     if not records:
-        return pd.DataFrame(
-            columns=["match_id", "bookmaker", "phase", "market", "selection", "line", "price"]
-        )
+        return pd.DataFrame(columns=columns)
 
     odds = pd.concat(records, ignore_index=True)
     odds = odds[odds["price"] > 1.0]
 
     # A file may carry both the old and new Pinnacle column names; keep one row
-    # per (match, bookmaker, phase, market, selection, line).
+    # per (key, bookmaker, phase, market, selection, line).
     odds = odds.drop_duplicates(
-        subset=["match_id", "bookmaker", "phase", "market", "selection", "line"],
+        subset=[key_name, "bookmaker", "phase", "market", "selection", "line"],
         keep="first",
     )
-    return odds[
-        ["match_id", "bookmaker", "phase", "market", "selection", "line", "price"]
-    ].reset_index(drop=True)
+    return odds[columns].reset_index(drop=True)
 
 
 def normalize_league_season(

@@ -94,9 +94,40 @@ def season_years(n_seasons: int = DEFAULT_HISTORY_SEASONS) -> list[int]:
 # --------------------------------------------------------------------------
 
 BASE_URL = "https://www.football-data.co.uk/mmz4281"
-FIXTURES_URL = "https://www.football-data.co.uk/fixtures.csv"
 
 USER_AGENT = "football-edge/0.1 (personal analytics project)"
+
+# --------------------------------------------------------------------------
+# Upcoming fixtures (Phase 4)
+# --------------------------------------------------------------------------
+# The source publishes the next few days of fixtures with current prices, and
+# **overwrites the file** each time it rebuilds it. Nothing archives the old
+# copies, so a price not written down when it is pulled cannot be recovered.
+# `fbedge/snapshots.py` exists for that reason; see its docstring.
+
+FIXTURES_URL = "https://www.football-data.co.uk/fixtures.csv"
+# The Excel twin of the same data. Not used - the CSV needs no extra
+# dependency - but recorded here so nobody has to go looking for it.
+FIXTURES_XLSX_URL = "https://www.football-data.co.uk/fixtures.xlsx"
+
+# How long a downloaded fixtures file may be reused before re-fetching. Short,
+# because the whole point of a snapshot archive is to catch price changes; a
+# long cache would archive the same prices repeatedly and miss the moves.
+FIXTURES_CACHE_HOURS = 2.0
+
+# How old the file may be before a scan refuses to run. Prices are collected
+# twice a week (Friday afternoon for the weekend, Tuesday afternoon for
+# midweek), so anything past about three days is either a browser-cache
+# problem - the source warns about exactly this on its own page - or a source
+# that has stopped updating. Either way, scanning it silently is worse than
+# stopping.
+FIXTURES_MAX_AGE_HOURS = 72.0
+
+# How far a snapshot's fixture date may drift from the played match's date and
+# still be the same match. One day catches postponements and late kick-offs
+# that roll over midnight, and is tight enough that two legs of a tie cannot
+# be confused: the same pair does not play twice inside three days.
+FIXTURE_RECONCILE_TOLERANCE_DAYS = 1
 
 # --------------------------------------------------------------------------
 # Injury feed
