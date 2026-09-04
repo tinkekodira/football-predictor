@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from fbedge import config, database, normalize, predict  # noqa: E402
+from fbedge import config, database, evidence, normalize, predict  # noqa: E402
 from fbedge.models import base  # noqa: E402
 
 
@@ -33,6 +33,15 @@ def main() -> int:
                         help="Shrinkage strength (default: %(default)s)")
     parser.add_argument("--ratings", action="store_true",
                         help="Also print the fitted team ratings for the league")
+    parser.add_argument("--half-time", action="store_true",
+                        help="Also price half-time result and half-time goals. "
+                             "Needs a second Dixon-Coles fit on half-time "
+                             "scores - they cannot be derived from the "
+                             "full-time one - so it roughly doubles the time.")
+    parser.add_argument("--no-evidence", action="store_true",
+                        help="Hide each market's track record. You are unlikely "
+                             "to want this: a fair price with no record beside "
+                             "it is the most misleading thing here.")
     parser.add_argument("--csv", type=Path, default=None,
                         help="Write every selection to a CSV file")
     parser.add_argument("--db", type=Path, default=config.DB_PATH)
@@ -61,12 +70,30 @@ def main() -> int:
             con, resolved["home"], resolved["away"],
             as_of=args.as_of, league=args.league, referee=args.referee,
             half_life_days=args.half_life, ridge=args.ridge,
+            half_time=args.half_time,
         )
     except base.InsufficientData as exc:
         print(f"Not enough history to model this league: {exc}")
         return 1
 
+    # Attach each market's own track record, on this league, before rendering.
+    # `render` prints whatever is in `forecast.evidence`, so a caller that has
+    # the evidence cannot forget to show it - but it does have to fetch it.
+    if not args.no_evidence:
+        stored = evidence.load(con, forecast.league)
+        markets_priced = sorted({s.market for s in forecast.selections})
+        forecast.evidence = evidence.short_labels(stored, markets_priced)
+        if stored.empty:
+            print(
+                "No evidence has been computed for this database, so every "
+                "market below is reported as untested.\n"
+                "Run: python scripts/build_evidence.py\n"
+            )
+
     print(forecast.render())
+
+    if not args.no_evidence:
+        _print_evidence(con, forecast)
 
     if args.ratings:
         bundle = predict.build_models(
@@ -85,6 +112,39 @@ def main() -> int:
 
     con.close()
     return 0
+
+
+def _print_evidence(con, forecast) -> None:
+    """The full record behind each market, under the prices it belongs to.
+
+    The short tag on each heading fits a table row; this is the sentence that
+    says what it means. Both are shown because the tag alone is enough to spot
+    a calibration-only market and not enough to understand one.
+    """
+    stored = evidence.load(con, forecast.league)
+    markets_priced = sorted({s.market for s in forecast.selections})
+    width = 66
+    print("What the labels mean")
+    print("-" * width)
+    for market, label in evidence.labels(stored, markets_priced).items():
+        print(f"  {market}")
+        for line in _wrap(label, width - 6):
+            print(f"      {line}")
+
+    if any(m.endswith(("cards", "card_handicap")) for m in markets_priced):
+        conditions = evidence.card_conditions(con, forecast.league)
+        print()
+        print("Card counting, on this league specifically")
+        print("-" * width)
+        for line in _wrap(conditions["note"], width - 4):
+            print(f"  {line}")
+    print("=" * width)
+
+
+def _wrap(text: str, width: int) -> list[str]:
+    import textwrap
+
+    return textwrap.wrap(text, width) or [""]
 
 
 if __name__ == "__main__":

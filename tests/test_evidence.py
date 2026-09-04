@@ -383,3 +383,58 @@ def test_the_result_counts_matches_that_could_not_be_bet(scan_db, as_of):
     result = backtest.run_backtest(scan_db, settings, verbose=False)
     assert isinstance(result.fitted_not_bettable, int)
     assert result.fitted_not_bettable >= 0
+
+
+# --------------------------------------------------------------------------
+# The command line must obey the same rule as the app
+# --------------------------------------------------------------------------
+
+def test_the_forecast_renders_its_evidence_when_it_has_any(scan_db, as_of):
+    """A fair price and its track record belong on the same screen.
+
+    `render` prints whatever is in `forecast.evidence`; this pins that it
+    actually does, so a caller that fetched the evidence cannot have it
+    silently dropped on the way to the terminal.
+    """
+    predict_mod.clear_model_cache()
+    forecast = predict_mod.predict_fixture(
+        scan_db, *database.known_teams(scan_db, league="E0")[:2],
+        as_of=as_of, league="E0",
+    )
+    assert "[" not in forecast.render(), "no labels were supplied, so none show"
+
+    forecast.evidence = {"1x2": "backtested, CLV -1.65%, n=999"}
+    rendered = forecast.render()
+    assert "Match result    [backtested, CLV -1.65%, n=999]" in rendered
+
+
+def test_a_half_time_market_is_priced_from_its_own_fit(scan_db, as_of):
+    """Not from the full-time matrix, and measurably not.
+
+    The half-time draw probability is much higher than the full-time one - a
+    goalless first half is common and a goalless match is not - so a derived
+    approximation would be visibly wrong here.
+    """
+    predict_mod.clear_model_cache()
+    home, away = database.known_teams(scan_db, league="E0")[:2]
+    forecast = predict_mod.predict_fixture(
+        scan_db, home, away, as_of=as_of, league="E0", half_time=True,
+    )
+    full = {s.selection: s.probability for s in forecast.market("1x2")}
+    half = {s.selection: s.probability for s in forecast.market("1x2_ht")}
+    assert half, "the half-time market was not priced"
+    assert half["draw"] > full["draw"], (
+        "a half-time draw must be likelier than a full-time one; if it is not, "
+        "the half-time prices are probably being derived from the full-time fit"
+    )
+    assert sum(half.values()) == pytest.approx(1.0, abs=1e-6)
+
+
+def test_half_time_markets_are_absent_unless_asked_for(scan_db, as_of):
+    predict_mod.clear_model_cache()
+    home, away = database.known_teams(scan_db, league="E0")[:2]
+    forecast = predict_mod.predict_fixture(
+        scan_db, home, away, as_of=as_of, league="E0",
+    )
+    assert not forecast.market("1x2_ht")
+    assert not forecast.market("total_goals_ht")
