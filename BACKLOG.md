@@ -227,6 +227,173 @@ the fact that it would replace the half-life with something estimated too.
 `ridge="auto"` is kept because reproducing the disagreement is the whole
 evidence for this entry. Do not turn it on.
 
+## B10. The Betfair Exchange benchmark was silently missing for two of three markets — FIXED
+
+**Severity: high — one backtest measured two markets against two different
+instruments.**
+
+`normalize.BOOKMAKERS` has carried `"BFE": "betfair_exchange"` since the
+exchange first appeared in the source, and `backtest.FAIR_LINE_PREFERENCE`
+puts it first precisely because an exchange charges commission rather than
+building a margin into its price. But `TOTALS_PREFIXES` and
+`HANDICAP_PREFIXES` were never updated, so `BFE>2.5`, `BFE<2.5`, `BFEAHH` and
+`BFEAHA` — present in every file from 2024/25 — were never extracted.
+
+The consequence was not a missing column, which would have been visible. It
+was that 1X2 CLV from 2024/25 onwards was measured against Betfair while
+totals and handicap CLV silently fell through to Pinnacle, inside the same
+run. B1 established that a benchmark change rewrites CLV; this was a permanent
+benchmark *split* along market lines.
+
+**Found 2026-09-04** by diffing the `fixtures.csv` header against the mapping
+during the Phase 4 work — the check the brief asked for rather than assumed.
+The same diff found `SKB*`: the source's SkyBet prefix is `SKB`, the mapping
+said `SK`, so SkyBet prices were dropped everywhere. New in 2026/27, so the
+loss was 594 rows rather than a decade of them.
+
+**FIXED 2026-09-04.** Both added. Measured cost of the correction, E0
+2024-08-01 to 2026-08-31, same code and window:
+
+| market | benchmark Pinnacle (old) | benchmark Betfair (fixed) | bets |
+|---|---|---|---|
+| total_goals | -1.745% (-4.9 SE) | **-1.993% (-5.5 SE)** | 495 |
+| asian_handicap | -1.968% (-9.4 SE) | **-1.871% (-8.7 SE)** | 600 |
+
+Both move by about two tenths of a point and in opposite directions, so no
+conclusion in `HANDOFF.md` changes. That it is *small* is the finding: the
+instrument was wrong and the answer was not, which is the opposite of B1.
+
+## B11. Handicap prices were stored with no line to settle them against — FIXED
+
+**Severity: medium — a third of the handicap table was unusable.**
+
+`_build_handicap_specs` emits three open-phase specs per bookmaker, one for
+each place the line might live (`B365AH`, `AHh`, `BbAHh`). `extract_odds` only
+skipped a spec when the *price* column was missing, so a spec whose *line*
+column was absent still wrote rows — with `line` NULL.
+
+98,498 rows, about 30% of `asian_handicap`. They were never a wrong number:
+`markets.price_selection` returns None for a handicap with no line, so the
+backtest skipped them silently. They were dead weight that made every
+`SELECT ... WHERE market = 'asian_handicap'` count wrong by a third.
+
+**FIXED 2026-09-04.** `normalize.odds_long` now returns early when a requested
+line column is absent. A price with no line is not a price: nothing can settle
+"home at 1.95" without knowing the start. After a rebuild, `asian_handicap`
+holds 225,604 rows of which 30 still carry a NULL line — those are genuinely
+blank `AHh` cells in the source, not a spec mismatch.
+
+## B12. The source now publishes its own xG, and nothing reads it
+
+**Severity: low — an unused input, not a defect.**
+
+`HxG` and `AxG` appear in the 2026/27 season files and are in no mapping table.
+The project already has xG from Understat, which covers 2014/15 onward, so this
+is not a gap in coverage — it is a second opinion on one season.
+
+Wiring it in is a model change, not an ingest change: `models/base.py` fits
+team strengths to a goals/xG blend and swapping the xG source mid-history would
+mean the blend is computed from Understat before 2026 and from
+football-data.co.uk after, which is precisely the kind of silent instrument
+change B1 and B10 are both about. If it is ever done, it should be done as a
+*comparison* — `scripts/compare_targets.py` already scores two targets on
+identical matches — and not as a substitution.
+
+## B13. FBref is gone as a source, and not only for xG
+
+**Severity: structural — it removes a roadmap item, and no code fixes it.**
+
+The roadmap said Phase 5 would add "xG from Understat, UEFA via FBref". The
+second half no longer exists.
+
+On 20 January 2026 Stats Perform (Opta) terminated FBref's data agreement and
+required immediate removal of every advanced statistic. Sports Reference
+announced it on 23 January and chose not to contest the claimed breach, citing
+the cost of litigation. Results, schedules, squads and basic match statistics
+remain. xG and every Opta-derived metric are gone indefinitely.
+
+**Checked on 2026-09-04 rather than assumed, and the check found something
+worse.** `fbref.com/en/comps/9/Premier-League-Stats` and `fbref.com/en/` both
+return **HTTP 403** to a scripted request — with a realistic browser
+user-agent, and through two separate network paths. So FBref is unusable here
+even for the results-only rescope, not merely stripped of the advanced data.
+
+**What to use instead**, if UEFA is ever wanted: football-data.org's free tier
+includes the Champions League and `fbedge/calendar.py` already speaks to it.
+openfootball has a Champions League file for 2024/25 and **not** for 2025/26 or
+2026/27, which is a concrete instance of the "occasional gaps mid-season" that
+module's docstring warns about — do not build on it for this.
+
+**The consequence for the model is not the source, it is the xG.** Understat
+covers the big five domestic leagues plus the RFPL from 2014/15 and has no UEFA
+coverage. The shipping model fits team strengths to a goals/xG blend, so a
+European fixture could only ever be fitted on goals — a different and worse
+model than the one every domestic number in `HANDOFF.md` describes. Mixing the
+two in one fit would be the same class of silent instrument change as B1 and
+B10.
+
+**Backtest side: already guarded.** A UEFA match arrives with a result and no
+odds. `BacktestConfig.calibration_markets` and `BacktestResult.fitted_not_bettable`
+make that explicit: odds-less matches are fitted and priced, contribute to
+calibration and to team strengths, and can never be settled as bets, because a
+record with no price has no expected value. Every run prints the count.
+
+## B14. The two "does team news matter" scripts get mistaken for each other
+
+**Severity: low — a documentation defect that has already misdirected work.**
+
+They answer the same question from different data and have opposite
+constraints, and the names do not make that obvious.
+
+`scripts/availability_signal.py` reads `match_lineups`, which
+`scripts/build_rosters.py` downloads from Understat. **No key, no quota, every
+season already in the database.** It has been run across five leagues and the
+result is the documented null. It is also the free availability proxy itself,
+implemented in `fbedge/availability.py`, with the honest caveat that Understat
+lists only players who *appeared* — so it conflates injury, suspension,
+rotation and transfer.
+
+`scripts/injury_signal.py` reads API-Football. **Keyed, 100 requests a day, and
+capped at recent seasons.** It is the one with a data ceiling: roughly 2022 to
+2024, which is three seasons of a question that wants ten. It has been run and
+produced the retest result, and `--status` now prints exactly what the
+unanswerable half needs and what it would cost.
+
+**This has cost time once.** A brief written on 2026-09-04 asked for
+`availability_signal.py` to be marked blocked and excluded from CI on the
+grounds that it needed a historical injury record, and then asked for the
+line-up proxy to be implemented as the honest alternative — which is what that
+script already is. Neither was done, because both were already false. Both
+docstrings now open by saying which of the two they are.
+
+## B15. A schema change can look like a price move in the snapshot archive
+
+**Severity: low now, and permanent if it is not noticed at the time.**
+
+The archive hashes each fixture's identity plus every price attached to it, so
+any change to *what is extracted* produces a new content hash and a new
+snapshot - which reads, later, as the market having moved.
+
+It happened immediately. The first pull on 2026-09-04 ran before the B11 fix
+and carried eight NULL-line Asian handicap rows per fixture. The pull 25
+minutes later did not. All 47 fixtures therefore appeared to change price, and
+none had: the 1X2, totals and handicap prices were byte-identical.
+
+**Cleaned, and this is the one deletion the archive will ever accept.** Before
+deleting, every non-NULL-line price in the superseded snapshots was checked to
+exist in the later one - zero real observations would be lost - and then the
+pre-fix pull was removed. The archive is append-only *for price observations*;
+a row that records a parser version rather than a market is not one.
+
+**What to do next time.** If the odds extraction changes again, either accept a
+one-off spurious change and note the date here, or clean it the same way within
+the same session. Do not clean it later: after real price movement has
+accumulated, "identical apart from the schema" stops being checkable.
+
+The alternative - versioning the hash so a parser change is visible as a
+parser change - is the proper fix and is not worth it for a solo archive that
+has changed schema once.
+
 ---
 
 ## Not bugs — open questions, kept here so they stay visible

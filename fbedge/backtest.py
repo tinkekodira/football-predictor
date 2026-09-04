@@ -72,7 +72,24 @@ FAIR_LINE_PREFERENCE = (
     "betfair_exchange", "pinnacle", "market_avg", "market_max", "bet365",
 )
 
+# The only markets this source carries historical prices for, and therefore
+# the only ones that can ever be settled as *bets*. Everything else the model
+# prices can be checked against what happened - which is calibration - but
+# there is nothing to bet into, so no closing line value exists for it.
+# `evidence.py` turns that distinction into the label shown next to a price.
 BETTABLE_MARKETS = ("1x2", "total_goals", "asian_handicap")
+
+# Markets scored for calibration only: priced from the model's own lines,
+# settled against the result, and given no price at all so they can never
+# become bets. See `BacktestConfig.calibration_markets`.
+DEFAULT_CALIBRATION_MARKETS = (
+    "1x2", "double_chance", "draw_no_bet", "btts", "total_goals",
+    "home_goals", "away_goals", "odd_even_goals", "winning_margin",
+    "asian_handicap", "total_corners", "total_cards",
+    "home_total_corners", "away_total_corners", "corner_handicap",
+    "home_total_cards", "away_total_cards", "card_handicap",
+    "1x2_ht", "total_goals_ht",
+)
 
 
 @dataclass
@@ -122,6 +139,18 @@ class BacktestConfig:
     # Off by default until it earns a place the way the blend did: measured on
     # leagues that had no part in choosing it. Needs scripts/build_rosters.py.
     use_availability: bool = False
+    # Markets to price and settle *without* a price, for calibration only.
+    # Empty by default so an ordinary backtest is unchanged and no slower.
+    #
+    # These records carry `price_taken = NaN`, which is what makes them
+    # unbettable: `BacktestResult.bets` requires a finite expected value, and
+    # expected value needs a price. That is deliberate and is the same guard
+    # the roadmap needs for UEFA matches, which would enter the database with
+    # no odds attached - see `fitted_not_bettable` in the result.
+    calibration_markets: tuple[str, ...] = ()
+    # Whether to fit the separate half-time model. Only needed when a
+    # half-time market is being scanned or scored.
+    fit_half_time: bool = False
 
 
 @dataclass
@@ -137,10 +166,23 @@ class BacktestResult:
     # any bookmaker's offer, so it exists even for matches nobody priced, and
     # duplicating it across every selection row would invite double-counting.
     match_totals: pd.DataFrame = field(default_factory=pd.DataFrame)
+    # Matches the models were fitted on and priced, but which no bookmaker in
+    # this source priced, so nothing on them could be settled as a bet. Zero
+    # for the five domestic leagues today; the counter exists because the
+    # roadmap adds UEFA results, which arrive with no odds at all, and a
+    # backtest that silently ignored them would look identical to one that had
+    # them. Printed by the report rather than kept to itself.
+    fitted_not_bettable: int = 0
 
     @property
     def bets(self) -> pd.DataFrame:
-        """Selections where the model saw value at the price it could take."""
+        """Selections where the model saw value at the price it could take.
+
+        Calibration-only records can never reach here: they carry no price, so
+        `expected_value` is NaN and the first condition drops them. That is the
+        mechanism, not a coincidence - a market with no price must never be
+        settleable as a bet.
+        """
         if self.predictions.empty:
             return self.predictions
         frame = self.predictions
@@ -149,6 +191,13 @@ class BacktestResult:
             & (frame["expected_value"] >= self.config.edge_threshold)
             & frame["price_taken"].between(self.config.min_price, self.config.max_price)
         ].copy()
+
+    @property
+    def calibration_only(self) -> pd.DataFrame:
+        """Records priced against no market, for calibration alone."""
+        if self.predictions.empty or "priceless" not in self.predictions:
+            return self.predictions.iloc[0:0]
+        return self.predictions[self.predictions["priceless"]].copy()
 
 
 def _load_fixtures(con, league: str, start: dt.date, end: dt.date) -> pd.DataFrame:
@@ -163,6 +212,10 @@ def _load_fixtures(con, league: str, start: dt.date, end: dt.date) -> pd.DataFra
         f"""
         SELECT m.match_id, m.date, m.home_team, m.away_team, m.referee,
                m.home_goals, m.away_goals, m.total_corners, m.total_cards,
+               m.home_corners, m.away_corners,
+               m.home_goals_ht, m.away_goals_ht,
+               COALESCE(m.home_yellows, 0) + COALESCE(m.home_reds, 0) AS home_cards,
+               COALESCE(m.away_yellows, 0) + COALESCE(m.away_reds, 0) AS away_cards,
                {columns}
         FROM matches m
         {joined}
@@ -317,6 +370,7 @@ def run_backtest(con, config: BacktestConfig, verbose: bool = True) -> BacktestR
     cursor = config.start
     refits = 0
     matches_seen = 0
+    unpriced = 0
 
     while cursor <= config.end:
         window_end = cursor + dt.timedelta(days=config.step_days)
@@ -329,12 +383,20 @@ def run_backtest(con, config: BacktestConfig, verbose: bool = True) -> BacktestR
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", base.ConvergenceWarning)
+                needs_counts = config.fit_count_models or any(
+                    m.endswith(("corners", "cards", "corner_handicap",
+                                "card_handicap"))
+                    for m in config.calibration_markets
+                )
                 bundle = predict_mod.build_models(
                     con, config.league, as_of,
                     half_life_days=config.half_life_days, ridge=config.ridge,
-                    use_cache=False, fit_counts=config.fit_count_models,
+                    use_cache=False, fit_counts=needs_counts,
                     target=config.target, blend_weight=config.blend_weight,
                     use_availability=config.use_availability,
+                    fit_half_time=config.fit_half_time or any(
+                        m.endswith("_ht") for m in config.calibration_markets
+                    ),
                 )
         except base.InsufficientData as exc:
             notes.append(f"{as_of}: skipped, {exc}")
@@ -343,8 +405,11 @@ def run_backtest(con, config: BacktestConfig, verbose: bool = True) -> BacktestR
         refits += 1
         for row in batch.itertuples():
             matches_seen += 1
+            match_odds = odds_by_match.get(row.match_id)
+            if match_odds is None or match_odds.empty:
+                unpriced += 1
             match_records, total_record = _score_match(
-                row, bundle, odds_by_match.get(row.match_id), config
+                row, bundle, match_odds, config
             )
             records += match_records
             total_records.append(total_record)
@@ -355,10 +420,22 @@ def run_backtest(con, config: BacktestConfig, verbose: bool = True) -> BacktestR
             f"Refitted {refits} times, scored {matches_seen} matches, "
             f"{len(predictions)} selections."
         )
+        if unpriced:
+            print(
+                f"WARNING: {unpriced} of {matches_seen} matches were fitted and "
+                "priced but carry no odds in this source, so nothing on them "
+                "could be settled as a bet. They contribute to calibration and "
+                "to team strengths, and to no CLV or ROI figure."
+            )
+    if unpriced:
+        notes.append(
+            f"{unpriced} matches fitted but not bettable: no odds in the source."
+        )
     return BacktestResult(
         predictions=predictions, config=config, refits=refits,
         matches=matches_seen, notes=notes,
         match_totals=pd.DataFrame(total_records),
+        fitted_not_bettable=unpriced,
     )
 
 
@@ -415,14 +492,17 @@ def _score_match(row, bundle, match_odds: pd.DataFrame | None, config):
         "total_pmf": total_pmf,
     }
 
+    records: list[dict] = []
+    if config.calibration_markets:
+        records += _calibration_records(row, bundle, config)
+
     if match_odds is None or match_odds.empty:
-        return [], total_record
+        return records, total_record
 
     market_probabilities = _market_probabilities(
         match_odds, config.margin_method, config.fair_line_preference,
         config.fair_line_fallback,
     )
-    records: list[dict] = []
 
     grouped = match_odds.groupby(["market", "selection", "line"], dropna=False)
     for (market, selection, line), group in grouped:
@@ -433,8 +513,7 @@ def _score_match(row, bundle, match_odds: pd.DataFrame | None, config):
 
         outcome = settlement.settle(
             market, selection, line_value,
-            int(row.home_goals), int(row.away_goals),
-            total_corners=row.total_corners, total_cards=row.total_cards,
+            int(row.home_goals), int(row.away_goals), **_settlement_inputs(row),
         )
         if outcome is None:
             continue
@@ -461,6 +540,8 @@ def _score_match(row, bundle, match_odds: pd.DataFrame | None, config):
                 "market": market,
                 "selection": selection,
                 "line": line_value,
+                # False: a bookmaker priced this, so it can become a bet.
+                "priceless": False,
                 "model_probability": priced.probability,
                 "push_probability": priced.push_probability,
                 "fair_price": priced.fair_price,
@@ -513,6 +594,99 @@ def _score_match(row, bundle, match_odds: pd.DataFrame | None, config):
             }
         )
     return records, total_record
+
+
+def _settlement_inputs(row) -> dict:
+    """Everything `settlement.settle` might need, from one fixture row.
+
+    Assembled once rather than at each call site because the team-level and
+    half-time markets each need a different pair of columns, and a caller that
+    forgets one gets `None` back - which reads as "unsettleable" and quietly
+    drops the market from calibration rather than failing.
+    """
+    def value(name):
+        raw = getattr(row, name, None)
+        return None if raw is None or pd.isna(raw) else float(raw)
+
+    return {
+        "total_corners": value("total_corners"),
+        "total_cards": value("total_cards"),
+        "home_corners": value("home_corners"),
+        "away_corners": value("away_corners"),
+        "home_cards": value("home_cards"),
+        "away_cards": value("away_cards"),
+        "home_goals_ht": value("home_goals_ht"),
+        "away_goals_ht": value("away_goals_ht"),
+    }
+
+
+def _calibration_records(row, bundle, config) -> list[dict]:
+    """Price the model's own lines and settle them, with no price attached.
+
+    **These records exist so that a market with no market can still be
+    checked.** Corners and cards have never had a historical price in this
+    source, and neither have BTTS, double chance or half-time goals. That does
+    not make them unmeasurable: the outcome is in the database, so whether the
+    model's 30% happens 30% of the time is answerable. What is *not* answerable
+    without prices is whether there is an edge, and the two claims are
+    different. `evidence.py` labels them differently for exactly that reason.
+
+    Every record here carries `price_taken = NaN`, so `BacktestResult.bets`
+    cannot reach them however the edge threshold is set.
+    """
+    wanted = set(config.calibration_markets)
+    selections, _goals, _corners, _cards = predict_mod.build_selections(
+        bundle, row.home_team, row.away_team, referee=getattr(row, "referee", None),
+        missing_home=_availability_or_zero(getattr(row, "missing_home", None)),
+        missing_away=_availability_or_zero(getattr(row, "missing_away", None)),
+    )
+    inputs = _settlement_inputs(row)
+    out: list[dict] = []
+    for selection in selections:
+        if selection.market not in wanted or selection.probability <= 0:
+            continue
+        outcome = settlement.settle(
+            selection.market, selection.selection, selection.line,
+            int(row.home_goals), int(row.away_goals), **inputs,
+        )
+        if outcome is None:
+            continue
+        out.append(
+            {
+                "match_id": row.match_id,
+                "date": row.date,
+                "home_team": row.home_team,
+                "away_team": row.away_team,
+                "market": selection.market,
+                "selection": selection.selection,
+                "line": selection.line,
+                # True: no bookmaker priced this, so it is calibration
+                # evidence and can never be a bet.
+                "priceless": True,
+                "model_probability": selection.probability,
+                "push_probability": selection.push_probability,
+                "fair_price": selection.fair_price,
+                "market_probability": np.nan,
+                "fair_line_source": None,
+                "price_taken": np.nan,
+                "price_source": None,
+                "price_close": np.nan,
+                "closing_source": None,
+                "same_book_close": np.nan,
+                "expected_value": np.nan,
+                "win_fraction": outcome.win,
+                "push_fraction": outcome.push,
+                "profit_at_taken": np.nan,
+                "profit_at_close": np.nan,
+                "model_conditional": _conditional(
+                    selection.probability, selection.push_probability
+                ),
+                "clv": np.nan,
+                "price_movement": np.nan,
+                "book_prices": {},
+            }
+        )
+    return out
 
 
 def _all_book_clv(group: pd.DataFrame, closing_fair: float) -> dict[str, float]:

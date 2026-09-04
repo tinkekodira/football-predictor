@@ -2,6 +2,30 @@
 
     python scripts/availability_signal.py --league E0 --from 2018-08-01
 
+**Status: DONE, on free data, with a null result. Not blocked.**
+
+Worth stating plainly because it has been mistaken for the opposite. This
+script needs **no API key and no quota**. It reads `match_lineups`, which
+`scripts/build_rosters.py` downloads from Understat for every season already in
+the database, and it has been run across five leagues. The result is in the
+availability section of HANDOFF.md: right signs in all six specifications,
+significance in none, and turning the feature on moves log loss by 0.00004.
+
+The *injury-feed* version of this question is the one with a data ceiling, and
+it lives in `scripts/injury_signal.py`. A free API-Football key serves roughly
+2022 to 2024, so a decade-deep historical injury record cannot be assembled on
+free data. That script says so and prices the alternative; this one does not
+need to, because it is not constrained by it.
+
+**This script is also the honest free alternative to an injury feed**, and it
+is what `fbedge/availability.py` implements: a player who was a regular starter
+and then does not appear is a weak but genuinely historical availability proxy,
+available at no cost across every season in the database. The docstring of that
+module is candid about the cost - Understat lists only players who *appeared*,
+so the proxy conflates injury, suspension, rotation and transfer, and a fit
+player left on the bench is indistinguishable from one in hospital. That
+conflation is the whole reason `injury_signal.py` exists.
+
 **This is a measurement, not a feature.** Nothing here changes the model. The
 question it answers is whether it is worth changing: if the share of a team's
 recent minutes belonging to newly absent players has no relationship to how

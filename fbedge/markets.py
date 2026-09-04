@@ -87,6 +87,64 @@ def double_chance(matrix: np.ndarray) -> list[Selection]:
     ]
 
 
+def draw_no_bet(matrix: np.ndarray) -> list[Selection]:
+    """1X2 with the draw removed and the stake returned on it.
+
+    A pure marginalisation of the same matrix, not a separate view of the
+    match: the draw becomes a push rather than a loss, so the fair price is
+    (1 - draw) / win. Deriving it any other way would let it disagree with the
+    1X2 it came from.
+    """
+    home, draw, away = (s.probability for s in match_odds(matrix))
+    return [
+        Selection("draw_no_bet", "home", home, push_probability=draw),
+        Selection("draw_no_bet", "away", away, push_probability=draw),
+    ]
+
+
+def odd_even_goals(matrix: np.ndarray) -> list[Selection]:
+    """Whether the total is odd or even. 0-0 is even.
+
+    Included because it is free from the matrix, not because it is
+    interesting: it is close to a coin flip by construction and the model has
+    no particular reason to know which side of it a match falls.
+    """
+    size = matrix.shape[0]
+    totals = np.add.outer(np.arange(size), np.arange(size))
+    odd = float(matrix[totals % 2 == 1].sum())
+    return [
+        Selection("odd_even_goals", "odd", odd),
+        Selection("odd_even_goals", "even", 1.0 - odd),
+    ]
+
+
+def winning_margin(matrix: np.ndarray, max_margin: int = 3) -> list[Selection]:
+    """Who wins and by how many, with the tail collapsed.
+
+    The tail is collapsed at `max_margin` because the individual cells beyond
+    it are thin enough that the model's estimate of them is mostly the shape of
+    the Poisson rather than anything it has learned. Collapsing rather than
+    truncating keeps the selections summing to one, which is what makes this
+    consistent with the 1X2 it is derived from.
+    """
+    size = matrix.shape[0]
+    margin = np.subtract.outer(np.arange(size), np.arange(size))
+    out = [Selection("winning_margin", "draw", float(np.trace(matrix)))]
+    for side, sign in (("home", 1), ("away", -1)):
+        for by in range(1, max_margin):
+            out.append(
+                Selection(
+                    "winning_margin", f"{side}_{by}",
+                    float(matrix[margin == sign * by].sum()),
+                )
+            )
+        tail = matrix[sign * margin >= max_margin].sum()
+        out.append(
+            Selection("winning_margin", f"{side}_{max_margin}_plus", float(tail))
+        )
+    return out
+
+
 def total_goals(
     matrix: np.ndarray, lines: tuple[float, ...] = DEFAULT_GOAL_LINES
 ) -> list[Selection]:
@@ -243,10 +301,27 @@ def price_selection(
         return next(
             (s for s in double_chance(matrix) if s.selection == selection), None
         )
+    if market == "draw_no_bet":
+        return next(
+            (s for s in draw_no_bet(matrix) if s.selection == selection), None
+        )
     if market == "btts":
         return next(
             (s for s in both_teams_to_score(matrix) if s.selection == selection), None
         )
+    if market == "odd_even_goals":
+        return next(
+            (s for s in odd_even_goals(matrix) if s.selection == selection), None
+        )
+    if market == "winning_margin":
+        return next(
+            (s for s in winning_margin(matrix) if s.selection == selection), None
+        )
+    if market in ("1x2_ht", "total_goals_ht"):
+        # Half-time markets are priced from their own matrix, which this
+        # function does not have. Returning None rather than quietly halving
+        # the full-time rates is the whole point: see `all_goal_selections`.
+        return None
     if line is None:
         return None
     if market == "total_goals":
@@ -282,6 +357,18 @@ def price_count_selection(
     return next((s for s in pair if s.selection == selection), None)
 
 
+def price_count_handicap(
+    home_pmf: np.ndarray, away_pmf: np.ndarray,
+    market: str, selection: str, line: float | None,
+) -> Selection | None:
+    """Price one count-handicap selection, the line read from the backed side."""
+    if line is None:
+        return None
+    home_line = float(line) if selection == "home" else -float(line)
+    pair = count_handicap(home_pmf, away_pmf, market, home_line)
+    return next((s for s in pair if s.selection == selection), None)
+
+
 def count_totals(pmf: np.ndarray, market: str, lines) -> list[Selection]:
     """Over/under on a count total, from a one-dimensional distribution."""
     counts = np.arange(len(pmf))
@@ -293,6 +380,133 @@ def count_totals(pmf: np.ndarray, market: str, lines) -> list[Selection]:
 
 def count_mean(pmf: np.ndarray) -> float:
     return float((pmf * np.arange(len(pmf))).sum())
+
+
+def count_difference(home_pmf: np.ndarray, away_pmf: np.ndarray):
+    """Distribution of (home count - away count), assuming independence.
+
+    Returns `(margins, probabilities)` with `margins` running from
+    `-(len(away)-1)` to `+(len(home)-1)`.
+
+    **Independence is an approximation here and it is the opposite of the one
+    the module makes for totals.** `models/counts.py` fits the match total
+    separately from the two team rates precisely because the two are positively
+    correlated - both sides win more corners in an open game - so convolving
+    two independent team distributions *understates* how much a total scatters.
+    A difference runs the other way: positive correlation cancels in a
+    subtraction, so independence *overstates* how much the difference scatters,
+    and a handicap priced from it is slightly too generous to the outsider.
+
+    That is a real approximation, stated rather than hidden, and it is the best
+    available: nothing in this source records the joint distribution, and there
+    is no historical corner or card handicap price to check it against.
+    """
+    joint = np.outer(np.asarray(home_pmf, float), np.asarray(away_pmf, float))
+    size_home, size_away = joint.shape
+    margins = np.subtract.outer(np.arange(size_home), np.arange(size_away))
+    offsets = np.arange(-(size_away - 1), size_home)
+    weights = np.bincount(
+        (margins - offsets[0]).ravel(), weights=joint.ravel(), minlength=len(offsets)
+    )
+    return offsets, weights
+
+
+def count_handicap(
+    home_pmf: np.ndarray, away_pmf: np.ndarray, market: str, line: float
+) -> list[Selection]:
+    """Handicap on a count, with `line` applied to the home team.
+
+    Same convention as the goals handicap: a negative line means the home side
+    gives that start, each selection reports the line from its own point of
+    view, and a whole line can push. Quarter lines are two half-stake bets and
+    are computed that way rather than approximated.
+
+    See `count_difference` for the independence assumption this rests on and
+    which way it errs.
+    """
+    if _is_quarter_line(line):
+        lower = count_handicap(home_pmf, away_pmf, market, line - 0.25)
+        upper = count_handicap(home_pmf, away_pmf, market, line + 0.25)
+        signs = (1.0, -1.0)
+        return [
+            Selection(
+                market, low.selection,
+                0.5 * (low.probability + high.probability),
+                line=sign * line,
+                push_probability=0.5 * (low.push_probability + high.push_probability),
+            )
+            for low, high, sign in zip(lower, upper, signs)
+        ]
+
+    offsets, weights = count_difference(home_pmf, away_pmf)
+    adjusted = offsets + line
+    return [
+        Selection(market, "home", float(weights[adjusted > 1e-9].sum()), line=line,
+                  push_probability=float(weights[np.abs(adjusted) < 1e-9].sum())),
+        Selection(market, "away", float(weights[adjusted < -1e-9].sum()), line=-line,
+                  push_probability=float(weights[np.abs(adjusted) < 1e-9].sum())),
+    ]
+
+
+def team_count_totals(
+    home_pmf: np.ndarray, away_pmf: np.ndarray, market: str, lines
+) -> list[Selection]:
+    """Over/under on each side's own count.
+
+    The count models fit a team rate and a match total separately by design -
+    see `models/counts.py` - so a team's own distribution is already there and
+    these are a straight read of it rather than a new fit. The match total is
+    *not* the sum of these two: summing two independent team distributions
+    understates how much totals scatter, because both teams win more corners in
+    an open game than a closed one. Use `count_totals` for the match total.
+    """
+    out: list[Selection] = []
+    for side, pmf in (("home", home_pmf), ("away", away_pmf)):
+        counts = np.arange(len(pmf))
+        for line in lines:
+            out += _over_under(pmf, counts, f"{side}_{market}", float(line))
+    return out
+
+
+# --------------------------------------------------------------------------
+# The whole set, from one matrix
+# --------------------------------------------------------------------------
+
+def all_goal_selections(
+    matrix: np.ndarray,
+    handicap_lines: tuple[float, ...] = (),
+    goal_lines: tuple[float, ...] = DEFAULT_GOAL_LINES,
+    team_goal_lines: tuple[float, ...] = DEFAULT_TEAM_GOAL_LINES,
+    correct_scores: int = 8,
+) -> list[Selection]:
+    """Every goal market this module can price, from one scoreline matrix.
+
+    **This function is the internal-consistency guarantee, made operational.**
+    The README's claim that "because every price comes from one matrix, they
+    cannot contradict each other" is only true while every caller derives its
+    prices the same way, and there were three callers doing it by hand before
+    this existed - the CLI, the app and the backtest - which is three chances
+    for one of them to drift. `test_markets_are_mutually_consistent` asserts
+    the arithmetic; this makes there be one place for it to hold.
+
+    Half-time markets are deliberately absent: they are not derivable from a
+    full-time matrix, because scoring rates are not uniform across the halves.
+    They come from their own fit. See `models/goals.py` and README.
+    """
+    out: list[Selection] = []
+    out += match_odds(matrix)
+    out += double_chance(matrix)
+    out += draw_no_bet(matrix)
+    out += total_goals(matrix, goal_lines)
+    out += both_teams_to_score(matrix)
+    out += team_totals(matrix, team_goal_lines)
+    out += odd_even_goals(matrix)
+    out += winning_margin(matrix)
+    for line in handicap_lines:
+        out += asian_handicap(matrix, line)
+    if correct_scores:
+        out += correct_score(matrix, correct_scores)
+    return out
 
 
 def suggested_lines(mean: float, spread: float = 2.0, step: float = 1.0) -> tuple[float, ...]:

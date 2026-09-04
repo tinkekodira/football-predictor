@@ -72,6 +72,59 @@ def settle_double_chance(selection: str, home_goals: int, away_goals: int) -> Se
     return WON if winner in covered else LOST
 
 
+def settle_draw_no_bet(selection: str, home_goals: int, away_goals: int) -> Settlement:
+    """Like 1X2, except the draw returns the stake instead of losing it."""
+    if home_goals == away_goals:
+        return PUSHED
+    winner = "home" if home_goals > away_goals else "away"
+    return WON if selection == winner else LOST
+
+
+def settle_odd_even(selection: str, total: int) -> Settlement:
+    """Odd or even total. Zero is even."""
+    odd = int(total) % 2 == 1
+    if selection == "odd":
+        return WON if odd else LOST
+    if selection == "even":
+        return LOST if odd else WON
+    raise ValueError(f"Unknown odd/even selection {selection!r}")
+
+
+def settle_winning_margin(
+    selection: str, home_goals: int, away_goals: int, max_margin: int = 3
+) -> Settlement:
+    """Who won and by how many, with the tail collapsed at `max_margin`.
+
+    `max_margin` must match the value `markets.winning_margin` priced with, or
+    the two disagree about which cell a 4-0 belongs to. It is a default in both
+    places rather than a shared constant only because the pricing side takes it
+    as an argument; if either ever changes, both must.
+    """
+    margin = int(home_goals) - int(away_goals)
+    if margin == 0:
+        return WON if selection == "draw" else LOST
+    side = "home" if margin > 0 else "away"
+    size = abs(margin)
+    expected = (
+        f"{side}_{max_margin}_plus" if size >= max_margin else f"{side}_{size}"
+    )
+    return WON if selection == expected else LOST
+
+
+def settle_count_handicap(
+    selection: str, line: float, home_count: float, away_count: float
+) -> Settlement:
+    """Handicap on corners or cards, settled exactly like the goals version.
+
+    Delegates to `settle_asian_handicap` because the arithmetic is identical -
+    a margin, a line, and the quarter-line split - and two copies of quarter
+    handicap logic is one more than this project should own.
+    """
+    return settle_asian_handicap(
+        selection, line, int(round(home_count)), int(round(away_count))
+    )
+
+
 def settle_over_under(selection: str, line: float, total: float) -> Settlement:
     """Over/under on any count: goals, corners, cards.
 
@@ -141,6 +194,12 @@ def settle(
     away_goals: int,
     total_corners: float | None = None,
     total_cards: float | None = None,
+    home_corners: float | None = None,
+    away_corners: float | None = None,
+    home_cards: float | None = None,
+    away_cards: float | None = None,
+    home_goals_ht: int | None = None,
+    away_goals_ht: int | None = None,
 ) -> Settlement | None:
     """Dispatch to the right settlement rule.
 
@@ -152,8 +211,14 @@ def settle(
         return settle_1x2(selection, home_goals, away_goals)
     if market == "double_chance":
         return settle_double_chance(selection, home_goals, away_goals)
+    if market == "draw_no_bet":
+        return settle_draw_no_bet(selection, home_goals, away_goals)
     if market == "btts":
         return settle_btts(selection, home_goals, away_goals)
+    if market == "odd_even_goals":
+        return settle_odd_even(selection, home_goals + away_goals)
+    if market == "winning_margin":
+        return settle_winning_margin(selection, home_goals, away_goals)
     if market == "total_goals":
         return settle_over_under(selection, float(line), home_goals + away_goals)
     if market == "home_goals":
@@ -170,6 +235,41 @@ def settle(
         if total_cards is None:
             return None
         return settle_over_under(selection, float(line), total_cards)
+
+    # Team-level and handicap variants of the count markets. Each needs both
+    # sides separately, which the match total cannot supply, so they return
+    # None rather than guessing when only the total was passed.
+    if market in ("home_total_corners", "away_total_corners", "corner_handicap"):
+        if home_corners is None or away_corners is None:
+            return None
+        if market == "corner_handicap":
+            return settle_count_handicap(
+                selection, float(line), home_corners, away_corners
+            )
+        side = home_corners if market.startswith("home") else away_corners
+        return settle_over_under(selection, float(line), side)
+    if market in ("home_total_cards", "away_total_cards", "card_handicap"):
+        if home_cards is None or away_cards is None:
+            return None
+        if market == "card_handicap":
+            return settle_count_handicap(
+                selection, float(line), home_cards, away_cards
+            )
+        side = home_cards if market.startswith("home") else away_cards
+        return settle_over_under(selection, float(line), side)
+
+    # Half-time markets settle on the half-time score, which is a different
+    # observation from the full-time one and is passed separately for exactly
+    # that reason. It cannot be derived from the full-time score - which is the
+    # concrete version of why the *pricing* side needs its own fit too.
+    if market in ("1x2_ht", "total_goals_ht"):
+        if home_goals_ht is None or away_goals_ht is None:
+            return None
+        if market == "1x2_ht":
+            return settle_1x2(selection, int(home_goals_ht), int(away_goals_ht))
+        return settle_over_under(
+            selection, float(line), int(home_goals_ht) + int(away_goals_ht)
+        )
     if market == "correct_score":
         expected = f"{home_goals}-{away_goals}"
         return WON if selection == expected else LOST

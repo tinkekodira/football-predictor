@@ -94,9 +94,83 @@ def season_years(n_seasons: int = DEFAULT_HISTORY_SEASONS) -> list[int]:
 # --------------------------------------------------------------------------
 
 BASE_URL = "https://www.football-data.co.uk/mmz4281"
-FIXTURES_URL = "https://www.football-data.co.uk/fixtures.csv"
 
 USER_AGENT = "football-edge/0.1 (personal analytics project)"
+
+# --------------------------------------------------------------------------
+# Upcoming fixtures (Phase 4)
+# --------------------------------------------------------------------------
+# The source publishes the next few days of fixtures with current prices, and
+# **overwrites the file** each time it rebuilds it. Nothing archives the old
+# copies, so a price not written down when it is pulled cannot be recovered.
+# `fbedge/snapshots.py` exists for that reason; see its docstring.
+
+FIXTURES_URL = "https://www.football-data.co.uk/fixtures.csv"
+# The Excel twin of the same data. Not used - the CSV needs no extra
+# dependency - but recorded here so nobody has to go looking for it.
+FIXTURES_XLSX_URL = "https://www.football-data.co.uk/fixtures.xlsx"
+
+# How long a downloaded fixtures file may be reused before re-fetching. Short,
+# because the whole point of a snapshot archive is to catch price changes; a
+# long cache would archive the same prices repeatedly and miss the moves.
+FIXTURES_CACHE_HOURS = 2.0
+
+# How old the file may be before a scan refuses to run. Prices are collected
+# twice a week (Friday afternoon for the weekend, Tuesday afternoon for
+# midweek), so anything past about three days is either a browser-cache
+# problem - the source warns about exactly this on its own page - or a source
+# that has stopped updating. Either way, scanning it silently is worse than
+# stopping.
+FIXTURES_MAX_AGE_HOURS = 72.0
+
+# Where the archive is mirrored as plain CSV, and it is **tracked in git**.
+#
+# The database is not tracked (BACKLOG B3) because it rebuilds from static
+# files in two minutes. The snapshot archive is the one thing in it that does
+# not: the source overwrites `fixtures.csv` and keeps no history, so a price
+# lost here is lost permanently. That is exactly the argument B3 used for
+# keeping the season CSVs tracked, applied to the one table that has a stronger
+# claim to it - the season files could at least be re-downloaded, and these
+# could not.
+#
+# Long format and sorted deterministically so a commit diff is the week's new
+# prices and nothing else.
+SNAPSHOT_EXPORT_DIR = DATA_DIR / "snapshots"
+
+# How far a snapshot's fixture date may drift from the played match's date and
+# still be the same match. One day catches postponements and late kick-offs
+# that roll over midnight, and is tight enough that two legs of a tie cannot
+# be confused: the same pair does not play twice inside three days.
+FIXTURE_RECONCILE_TOLERANCE_DAYS = 1
+
+# --------------------------------------------------------------------------
+# The forward calendar (Phase 4)
+# --------------------------------------------------------------------------
+# `fixtures.csv` gives the next few days. A whole remaining season needs a
+# source that publishes one. Three are wired up in `fbedge/calendar.py`; this
+# picks between them.
+#
+# "auto" uses football-data.org when a token is configured and openfootball
+# when one is not, so a machine with no key does something sensible rather than
+# failing on a setting it never chose. "understat" is what the home page has
+# always used and needs no key either.
+CALENDAR_SOURCE = "auto"
+
+# Never committed, and read from the environment for the same reason the injury
+# key is: a key in a tracked file is a key in the history for ever.
+CALENDAR_TOKEN_ENV = "FOOTBALL_DATA_ORG_TOKEN"
+
+# football-data.org's published free-tier allowance, confirmed on their pricing
+# page: twelve competitions, ten calls a minute, scores and schedules delayed.
+# Enforced client-side in `calendar._respect_rate_limit` rather than left to the
+# server to reject - a 429 is a wasted request, and repeated hammering is how
+# access gets withdrawn without warning.
+CALENDAR_CALLS_PER_MINUTE = 10
+
+# A season calendar changes rarely. Twelve hours keeps a postponement current
+# without spending quota or somebody else's GitHub bandwidth; a finished season
+# is never refetched at all.
+CALENDAR_CACHE_HOURS = 12.0
 
 # --------------------------------------------------------------------------
 # Injury feed
@@ -129,6 +203,27 @@ INJURY_LEAGUE_IDS: dict[str, int] = {
 # so five calls refresh everything. Two hours keeps a matchday current without
 # coming close to the limit.
 INJURY_CACHE_HOURS = 2
+
+# The free plan's published allowances, confirmed 2026-09-04: 100 requests a
+# day, resetting at 00:00 UTC with unused requests lost, and 10 a minute.
+#
+# **Both are enforced locally, before the request goes out.** A spent quota is
+# not a soft failure: the endpoint keeps answering 200 with an empty list on
+# some errors, so a run that blows the budget can look like a league with
+# nobody injured. And repeated hammering is how access gets withdrawn without
+# warning, which would cost the only keyed source in the project.
+INJURY_DAILY_QUOTA = 100
+INJURY_CALLS_PER_MINUTE = 10
+
+# Stop this many requests short of the published daily limit. One careless
+# loop is all it takes, and leaving a few in reserve means a spent budget can
+# still be diagnosed interactively rather than only tomorrow.
+INJURY_QUOTA_RESERVE = 5
+
+# Where the spend is recorded. A file rather than a variable, because the limit
+# is per key per day and this project is many short-lived processes: an
+# in-memory counter would reset on every script invocation and count nothing.
+INJURY_QUOTA_PATH = DATA_DIR / "raw" / "injuries" / "quota.json"
 
 # **The free plan caps the seasons it will serve.** Confirmed empirically:
 # 2024 returns 3,168 Premier League rows, the current season returns nothing.

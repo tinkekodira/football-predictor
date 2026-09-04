@@ -3,6 +3,19 @@
     python scripts/build_injuries.py --season 2024     # then 2023, 2022
     python scripts/injury_signal.py --league E0 --from 2024-08-01 --to 2025-06-01
 
+**PARTIALLY BLOCKED, and the blocked half is the half that would settle it.**
+This script has been run and produced a result - see the retest section of
+HANDOFF.md - but only over the three seasons a free API-Football key will
+serve. `print_blocked_status()` states exactly what the unanswerable half
+needs and roughly what it would cost; run this script with `--status` to read
+it without running anything.
+
+The distinction matters because a script that runs and prints numbers looks
+finished. This one is a three-season measurement of a question that wants a
+decade, and the three seasons available are not a random sample of the
+decade - they are the most recent three, which is also the era in which the
+model's closing line value went negative.
+
 **This exists because the availability study had one stated weakness and this
 fixes exactly it.** That study built absences from Understat line-ups, which
 list only players who *appeared*, so a fit player left on the bench and a
@@ -272,8 +285,79 @@ def report(frame: pd.DataFrame, label: str, bootstrap: int, seed: int) -> dict |
     }
 
 
+# What the unanswerable half of this question would need, and what it costs.
+# Figures checked 2026-09-04 against the provider's own pages; the plan prices
+# are theirs and will drift, so the shape of the arithmetic matters more than
+# the exact number.
+BLOCKED_STATUS = """
+  BLOCKED: the deep version of this question cannot be answered on free data.
+
+  What has been answered.
+    Three seasons - roughly 2022 to 2024, which is what a free API-Football key
+    serves - across five leagues. Own absentees -1.8% per player (z -1.87, not
+    significant); the opponent's +1.5% to +2.7% (z 2.6 to 3.0, right sign in
+    four or five leagues of five). The -7.7% first reported from one season of
+    E0 did not replicate. See the retest section of HANDOFF.md.
+
+  Why that is not the answer.
+    Three seasons is about 5,600 matches across the five leagues. The effect
+    being chased is one or two percent on a scoring rate, and at that sample
+    size two standard errors is roughly the same size as the effect - which is
+    exactly why the own-team coefficient carries the right sign and misses
+    significance. Nine or ten seasons would take the detectable effect to
+    roughly half of what it is now.
+
+    And the three seasons available are not a random sample of the decade.
+    They are the most recent three, which is also the era in which this model's
+    closing line value went negative (see Finding 1). Anything found in that
+    window alone cannot be separated from whatever else changed in it.
+
+  What it would take.
+    A per-fixture injury record for five leagues over nine or ten seasons.
+    API-Football's /injuries endpoint is addressed by league and season and
+    returns the whole thing in one call, so the requests themselves are
+    trivial - about fifty for a full backfill, well inside even a free day's
+    hundred. **The block is not the request count, it is the season ceiling**:
+    a free key serves recent seasons only, empirically stopping at
+    {last_season} in this project's own testing, and no amount of patience
+    unlocks an older one.
+
+  Roughly what that costs.
+    A paid API-Football plan, which is where the deeper historical range sits:
+    their Pro tier was around $19/month and Ultra around $29/month when this
+    was written, and the relevant difference between tiers is historical depth
+    rather than features. One or two months of the cheapest tier that reaches
+    2016 would be enough - this is a backfill, not a subscription, because the
+    record is downloaded once and stored.
+
+  Before spending anything, note two things.
+    The current result already says the *opponent's* absentees matter and a
+    team's own do not, which is the more surprising half and is significant on
+    the data that does exist. Deeper history would sharpen the own-team
+    coefficient, not overturn that.
+
+    And this project's README is right that a paid odds feed is the first thing
+    worth spending money on, because that would make the corner and card models
+    backtestable as bets at all - they currently cannot be, at any sample size.
+    This is the second thing, not the first.
+"""
+
+
+def print_blocked_status() -> None:
+    """Say exactly what is unanswerable here, and what answering it would cost.
+
+    Printed rather than buried, because a script that runs and prints numbers
+    looks finished. This one is a three-season measurement of a question that
+    wants a decade, and the reader should know which they are looking at.
+    """
+    print(BLOCKED_STATUS.format(last_season=config.INJURY_FREE_PLAN_LAST_SEASON))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--status", action="store_true",
+                        help="Print what this question needs and what it would "
+                             "cost, and exit without running anything.")
     parser.add_argument("--league", choices=sorted(config.LEAGUES), default="E0")
     parser.add_argument(
         "--leagues", nargs="+", choices=sorted(config.LEAGUES), default=None,
@@ -281,13 +365,23 @@ def main() -> int:
              "too small to read: the first pass on a single season of E0 gave "
              "-7.7 percent and the same league over three seasons gave -4.6.",
     )
-    parser.add_argument("--from", dest="start", required=True)
+    # Not `required=True`: --status must work on its own, and a flag that
+    # exists to explain why a question is unanswerable should not itself
+    # demand the parameters of the answer.
+    parser.add_argument("--from", dest="start", default=None)
     parser.add_argument("--to", dest="end", default=None)
     parser.add_argument("--step-days", type=int, default=7)
     parser.add_argument("--bootstrap", type=int, default=400)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--db", type=Path, default=config.DB_PATH)
     args = parser.parse_args()
+
+    if args.status:
+        print_blocked_status()
+        return 0
+
+    if args.start is None:
+        parser.error("--from is required unless --status is given")
 
     if not args.db.exists():
         print(f"No database at {args.db}.")
@@ -318,6 +412,10 @@ def main() -> int:
     print("\n  Reminder: this measures whether absences move scoring. It does "
           "not\n  establish the information was knowable before the price - see "
           "the\n  docstring.")
+    # Printed after the numbers, not instead of them. A run that prints
+    # coefficients looks like a finished study; this says which part of
+    # the question those coefficients can and cannot reach.
+    print_blocked_status()
     return 0
 
 

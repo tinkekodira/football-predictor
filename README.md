@@ -3,15 +3,27 @@
 A football analytics platform for the top five European leagues: Premier League,
 La Liga, Serie A, Bundesliga and Ligue 1.
 
-**Phases 1 to 3 are built.** Phase 1 is the data spine: it downloads a decade
+**Phases 1 to 4 are built.** Phase 1 is the data spine: it downloads a decade
 of real match data, normalises it, stores it and checks it. Phase 2 is the
-model: fitted team ratings that produce probabilities and fair prices for every
-market — 1X2, over/under, both teams to score, Asian handicap, corners, cards,
-correct score. Phase 3 is the part that decides whether any of it is worth
-believing: a walk-forward backtest measuring calibration, closing line value
-and returns with honest confidence intervals.
+model: fitted team ratings that produce probabilities and fair prices for
+twenty markets from a single fit. Phase 3 is the part that decides whether any
+of it is worth believing: a walk-forward backtest measuring calibration,
+closing line value and returns with honest confidence intervals. Phase 4 points
+the same machinery forwards, at fixtures that have not been played — and
+attaches to every price the track record that price actually has.
 
-Total cost to run: nothing. No API key, no subscription, no scraping.
+**Total cost to run: nothing.** No API key and no subscription are needed for
+anything in the quick start. Two qualifications, because the earlier version of
+this line said "no scraping" and that was not true:
+
+- **`understat.py` scrapes Understat.** It reads a JSON endpoint the site's own
+  page calls, caches every response to disk, and is what supplies the expected
+  goals the shipping model is fitted to. It is free and needs no key, but it is
+  somebody else's server and it is not a published API.
+- **Two features take an optional key**, and degrade to absent without one
+  rather than breaking: club badges and injuries need a free API-Football key,
+  and the football-data.org calendar takes a free token. The openfootball
+  calendar needs none.
 
 ---
 
@@ -25,8 +37,34 @@ pip install -r requirements.txt
 python scripts/build_database.py --seasons 10        # ~2 min, from the CSVs in the repo
 python scripts/build_xg.py                           # expected goals (the model default)
 python scripts/build_fixtures.py                     # the season calendar the home page needs
+python scripts/build_evidence.py                     # ~6 min; what each market's record is
 streamlit run app.py
 ```
+
+`build_evidence.py` is the one that is easy to skip and should not be. It runs
+a walk-forward per league and stores what each market's calibration and closing
+line value actually are, and everything that shows a price reads it. Without it
+every market is labelled UNTESTED — which is accurate, and useless.
+
+**Then, for the forward-looking half:**
+
+```bash
+python scripts/snapshot_fixtures.py                  # archive this week's prices
+python scripts/scan_fixtures.py --league E0          # what the model disagrees with
+python scripts/build_calendar.py                     # the rest of the season's fixtures
+```
+
+**Run `snapshot_fixtures.py` on a schedule if you run nothing else.** The
+source overwrites `fixtures.csv` every time it rebuilds it and archives
+nothing, so a pre-match price not captured when it is published is gone
+permanently. Every other table here rebuilds from static files in two minutes;
+that one cannot be rebuilt at all.
+
+For the same reason it is the one table mirrored to **tracked** CSV, in
+`data/snapshots/`. The database is not in the repository because it rebuilds
+itself; this does not, so commit that directory after each run. It is the only
+copy of those prices, and `snapshots.import_export` restores it into a fresh
+clone.
 
 **The database is not in the repository** - it is a 22MB binary that changes
 most sessions, and it is rebuilt by the commands above. The season CSVs it is
@@ -120,10 +158,13 @@ difference is absorbed, but the raw numbers are not comparable across borders.
 
 | Gap | Consequence |
 |---|---|
-| No UEFA competitions | Top-5 domestic only until Phase 5 adds FBref |
-| No xG | Goal models run on actual goals for now, which is noisier |
-| Referee missing in some leagues | Card models are league-dependent |
+| No UEFA competitions | Top-5 domestic only. FBref was the plan and is gone — see the roadmap |
+| No xG | Supplied by Understat instead, and the blend is the shipping default |
+| No corner or card prices | Those models can be calibrated but never backtested as bets |
+| No BTTS, double-chance or half-time prices | Same: modelled and calibrated, never bettable here |
+| Referee missing in some leagues | Card models are league-dependent, and the app says which applies |
 | Corners/shots thin before ~2005 | Ten seasons of history is the practical depth |
+| One round of upcoming fixtures, overwritten weekly | Archived on every pull, because it cannot be recovered |
 
 The build prints a coverage report showing exactly which columns are populated
 for which league-seasons, so none of this is a surprise later.
@@ -141,7 +182,10 @@ fbedge/
   quality.py     coverage report and integrity assertions
   profile.py     the descriptive fixture card
   fixtures.py    the season calendar, played and unplayed
-  injuries.py    the external injury feed (needs an API key)
+  calendar.py    the same, from three sources behind one interface
+  snapshots.py   the append-only archive of the weekly fixtures file
+  evidence.py    what track record each market on each league actually has
+  injuries.py    the external injury feed (optional key, daily budget enforced)
   crests.py      club badges, downloaded once and inlined
   models/
     base.py      time decay, ridge priors, point-in-time training sets
@@ -158,6 +202,10 @@ fbedge/
   availability.py who is missing, from strictly earlier matches only
 scripts/
   build_database.py    one command: download, normalise, load, verify
+  snapshot_fixtures.py archive this week's prices before they are overwritten
+  scan_fixtures.py     the pre-match EV scan, every row labelled with its record
+  build_evidence.py    walk-forward per league, stored so a scan can read it
+  build_calendar.py    the remaining season, from openfootball or football-data.org
   make_sample_data.py  synthetic CSVs for offline work and tests
   show_fixture.py      the text version of the descriptive card
   predict_fixture.py   the text version of the model forecast
@@ -171,7 +219,8 @@ scripts/
   season_breakdown.py  CLV by season, with a benchmark-change warning
   goals_shape.py       is the goals distribution the right shape
 app.py                 the Streamlit web app
-tests/                 291 tests, run with: python -m pytest
+scan_view.py           the pre-match scan, as a tab in it
+tests/                 543 tests, run with: python -m pytest
 ```
 
 Four design decisions worth knowing about:
@@ -187,8 +236,9 @@ a filter and an average over that view, so home/away logic lives in exactly one
 place instead of being re-derived in every query.
 
 **Odds in long format.** One row per price, rather than a hundred wide columns.
-Adding a bookmaker or a market in Phase 4 becomes a data change, not a schema
-migration.
+This paid off exactly as intended in Phase 4: the archive of upcoming prices is
+the same shape as the historical table and reuses the same reader, so adding it
+was a data change rather than a schema migration.
 
 **Point-in-time correctness, enforced by tests.** Every query filters on
 `date < as_of`. Nothing can see a match that had not been played at the moment
@@ -196,6 +246,74 @@ being asked about. This is not tidiness: Phase 3's walk-forward backtest calls
 these same functions with historical dates, and one leak of future information
 would produce a backtest showing a spectacular edge that does not exist. Two of
 the tests exist solely to guard this.
+
+---
+
+## What this can actually tell you
+
+Every market below comes from one fit. What differs is the evidence behind it,
+and there are only three possibilities:
+
+- **Backtested.** The source carries historical prices, so the model's
+  selections were settled as bets against a real market and closing line value
+  is measurable. Three markets qualify. That is not a shortlist, it is the
+  complete list of prices football-data.co.uk publishes.
+- **Calibration only.** No price exists to bet into, but the outcome is
+  recorded, so "when the model says 30%, does it happen 30% of the time" is
+  answerable and has been answered. **"The model is well calibrated on corners"
+  and "there is an edge in corner markets" are different claims, and only the
+  first is supported.** Confirming the second needs a paid odds feed.
+- **Untested.** Priced, and no calibration run has scored it yet.
+
+Figures below are from `scripts/build_evidence.py` over 2022-08-01 onward, all
+five leagues, ranges across leagues rather than a pooled average — a card model
+in France and one in England are not the same measurement. The app and the scan
+show the per-league figure, never this table's range.
+
+| Market | Status | Calibration slope | n | CLV |
+|---|---|---|---|---|
+| 1X2 | backtested | 0.98–1.20 | 21,543 | −1.49% over 8,881 bets |
+| Over/under goals | backtested | 0.98–1.04 | 71,810 | −1.71% over 4,869 bets |
+| Asian handicap | backtested | 1.01–1.26 | 57,712 | −1.39% over 5,368 bets |
+| Double chance | calibration only | 0.98–1.20 | 21,543 | no price exists |
+| Draw no bet | calibration only | 1.06–1.26 | 10,740 | no price exists |
+| Winning margin | calibration only | 0.98–1.24 | 50,267 | no price exists |
+| Both teams to score | calibration only | **0.33–0.93** | 14,362 | no price exists |
+| Team goals (home/away) | calibration only | 0.95–1.08 | 43,086 | no price exists |
+| Odd/even goals | calibration only | **−2.41–1.54** | 14,362 | no price exists |
+| Half-time result | calibration only | 0.82–0.86 | 21,540 | no price exists |
+| Half-time goals | calibration only | 0.91–1.01 | 43,080 | no price exists |
+| Total corners | calibration only | 0.81–0.89 | 92,694 | no price exists |
+| Team corners | calibration only | 0.81–0.94 | 43,080 | no price exists |
+| Corner handicap | calibration only | 0.90–1.10 | 40,996 | no price exists |
+| Total cards | calibration only | 0.91–1.03 | 76,006 | no price exists |
+| Team cards | calibration only | 0.89–1.09 | 43,039 | no price exists |
+| Card handicap | calibration only | 1.11–1.26 | 38,434 | no price exists |
+| Correct score | untested | — | — | no price exists |
+
+**Fifteen of a hundred market-league pairs are backtested.** The other
+eighty-five are modelled and checked and have never been bet into, and the app
+says so next to every one of them.
+
+Read the slope as: 1.0 is right, below 1 means the probabilities are spread too
+far apart, above 1 means they hedge towards the base rate. Three rows are worth
+singling out because the numbers are unflattering and the table is not here to
+flatter:
+
+**Odd/even goals is noise.** The slope ranges from −2.41 to 1.54 across five
+leagues, and a negative slope means that in that league the model's confidence
+pointed the wrong way. That is the expected result — the parity of a total is
+close to a coin flip by construction and there is nothing there to know — and
+it is exactly why the market is labelled rather than quietly listed.
+
+**Both teams to score is over-confident**, at 0.33 to 0.93. The model separates
+fixtures on BTTS more sharply than the results justify, in every league.
+
+**The card handicap is the opposite**, at 1.11 to 1.26, and the reason is
+written down in advance: it is derived by treating the two teams' card counts
+as independent, which overstates how much their *difference* scatters, so the
+prices sit too close to even money. `markets.count_difference` says so in its
+docstring, and the measurement agrees with the prediction.
 
 ---
 
@@ -212,7 +330,22 @@ and adding a correction for exactly those four cells.
 
 Because every price comes from one matrix, they cannot contradict each other.
 A system that fits each market separately will happily quote an over 2.5 that
-is inconsistent with its own correct-score prices.
+is inconsistent with its own correct-score prices. That used to be true by
+construction and is now *checked*: `tests/test_market_consistency.py` asserts
+twelve identities between markets, so a refactor that breaks the shared
+derivation fails there rather than in front of a reader comparing two prices on
+one screen.
+
+**Half-time markets are the exception, and they get their own fit.** They are
+not derivable from the full-time matrix, and halving the full-time rates would
+be wrong in two directions at once. On the Premier League, 44.6% of goals
+arrive before the interval rather than 50%, and the fitted half-time home
+advantage is *larger* than the full-time one — 0.33 against 0.20. So
+`TrainingSet.half_time()` hands the same Dixon-Coles machinery the half-time
+columns and gets an independent fit with its own ratings, its own home
+advantage and its own low-score correction. It is off by default because it
+doubles the fitting time, and `markets.price_selection` returns None for a
+half-time market rather than approximating one.
 
 **Corners and cards: negative binomial.** Both are overdispersed — their
 variance exceeds their mean — so a Poisson fit would be too confident about the
@@ -251,8 +384,9 @@ explain why. `ridge="auto"` is kept so the disagreement can be reproduced, and
 should stay off.
 
 Both knobs are exposed in the app's sidebar and on the command line. The
-defaults are conventional values from the literature; Phase 3 will tune them by
-walk-forward validation rather than by taste.
+defaults started as conventional values from the literature, and Phase 3's
+tuner has since searched them on a walk-forward split — and reported that the
+search fitted noise, so they stayed. See "Tuning, without fooling yourself".
 
 **How it is checked.** The analytic gradients are verified against numerical
 differentiation in the test suite, because a wrong gradient does not crash — it
@@ -321,12 +455,20 @@ noise and the script says so.
 
 ### What this data cannot tell you
 
-The source has no historical corner or card prices. Those models can be checked
-for calibration against what actually happened, but they cannot be backtested
-as bets, because there is nothing to bet into. If the corner markets turn out to
-be where the edge is, confirming that needs a paid odds feed — which is the
-first thing worth spending money on, and only once the goal models have earned
-it.
+The source has no historical corner or card prices — and no BTTS,
+double-chance, team-total or half-time prices either. Those models can be
+checked for calibration against what actually happened, but they cannot be
+backtested as bets, because there is nothing to bet into. If the corner markets
+turn out to be where the edge is, confirming that needs a paid odds feed —
+which is the first thing worth spending money on, and only once the goal models
+have earned it.
+
+The same limitation has a forward-looking twin. A match with results and no
+odds is fitted, priced, and counted towards calibration, and can never be
+settled as a bet: the record carries no price, so it has no expected value, and
+`BacktestResult.bets` requires one. Every run prints how many matches were
+fitted but not bettable. That is the guard the roadmap needs before UEFA
+results ever enter the database.
 
 ---
 
@@ -356,25 +498,84 @@ have completely turned over. The models do not use it.
 | 1 | Data spine, quality checks, fixture profiles, web app | **done** |
 | 2 | Dixon-Coles goals model, negative-binomial corners and cards | **done** |
 | 3 | Walk-forward backtest, calibration, closing line value, tuning | **done** |
-| 4 | Upcoming fixtures, live EV scanner against book prices | next |
-| 5 | xG from Understat, UEFA via FBref, fatigue, lineups | |
+| 4 | Fixture archive, pre-match EV scan, forward calendar, market coverage | **done** |
+| 5a | xG from Understat | **mostly done** |
+| 5b | UEFA competitions, **results only** — see below | blocked on a source |
+| 5c | Fatigue and congestion, line-ups | |
 
-Phase 4 points the same machinery at fixtures that have not been played yet:
-pulling the upcoming list and current prices, running the model against them,
-and surfacing anything it thinks is mispriced. The engine for that already
-exists — a live scan is a backtest with the results column missing.
+Phase 4 points the same machinery at fixtures that have not been played yet.
+The engine already existed — a pre-match scan is a backtest with the results
+column missing — so the work was the parts around it: an append-only archive of
+the source's twice-weekly price file, which is overwritten weekly and cannot be
+reconstructed afterwards; a whole-season calendar; and the evidence labelling
+that stops a price ever reaching a reader without its track record.
+
+**It is a pre-match scan, not a live scanner**, which is what the roadmap used
+to call it. Prices in this source are collected on Friday afternoons no later
+than 17:00 British time for weekend fixtures and Tuesdays no later than 13:00
+for midweek ones. Nothing here watches a market move.
+
+### Phase 5 was reordered, and half of it was rescoped
+
+**Understat xG comes first**, because it is nearly delivered and is the
+higher-value half: `understat.py` and `build_xg.py` exist, `compare_targets.py`
+scores goals against xG against a blend on identical matches, and the blend is
+already the shipping default.
+
+**The FBref half is gone.** On 20 January 2026 Stats Perform (Opta) terminated
+FBref's data agreement and required the removal of all advanced statistics;
+Sports Reference announced it on 23 January and did not contest it, citing
+legal costs. Results, schedules, squads and basic match statistics remain on
+the site. xG and every Opta-derived advanced metric do not, and are not coming
+back.
+
+Two things follow, and the second was found while checking the first:
+
+1. **UEFA work is rescoped to results only.** There is no free xG for European
+   competition at any quality. Understat covers the big five domestic leagues
+   plus the RFPL from 2014/15 and has no UEFA coverage at all, so a European
+   fixture cannot be priced on the same footing as a domestic one however the
+   results arrive.
+2. **FBref is no longer usable as a source here even for results.** Verified
+   2026-09-04: `fbref.com` returns HTTP 403 to a scripted request, with a
+   browser user-agent and through two separate network paths. The results-only
+   rescope therefore needs a different source, and the free tier of
+   football-data.org — already wired up in `fbedge/calendar.py` — includes the
+   Champions League. openfootball has a Champions League file for 2024/25 but
+   not for 2025/26 or 2026/27, so it is not the one to rely on.
+
+**The backtest is guarded for this already.** UEFA matches would enter the
+database with results and no odds, and a bet cannot be settled against a price
+that does not exist. Matches with no odds are fitted and priced — they inform
+team strengths and count towards calibration — and can never become bets,
+because a record with no price has no expected value and `BacktestResult.bets`
+requires one. Every run prints how many matches were fitted but not bettable.
+This is the same limitation already documented for corners and cards, and it is
+the same mechanism: no price, no bet, no closing line value.
 
 ---
 
 ## An honest note on what this is for
 
-Phase 3 will probably tell you the first models are worse than the closing line.
-That is the normal result. The closing price at a sharp bookmaker aggregates an
-enormous amount of information, and beating it is genuinely difficult.
+**Phase 3 said the models are worse than the closing line, and they still are.**
+That was the expected result and it is the measured one: closing line value on
+the backtested markets runs about −1.5% across five leagues, and the model's own
+log loss has trailed the market throughout. The closing price at a sharp
+bookmaker aggregates an enormous amount of information, and beating it is
+genuinely difficult.
 
 That is why the backtest's primary measure is closing line value rather than
 profit: over a few hundred bets, return on investment is almost pure noise,
 while whether you consistently beat the closing price is measurable in weeks.
+
+**Phase 4 makes this more important, not less.** A scan output is the first
+thing this project produces that looks like a betting tip, and it is not one. A
+positive expected value means the model disagrees with the price — and the
+evidence above is that when this model disagrees with a closing line, the model
+is usually the one that is wrong. Every row of the scan carries that record,
+and the first live run put two newly promoted clubs at the top of the table at
++68% and +50%, on two matches of history each, which is what a model
+disagreeing out of ignorance looks like.
 
 Treat this as a software and statistics project, which is where its real value
 is. Nothing should be staked until a full backtest plus a stretch of
@@ -385,6 +586,43 @@ you would have spent on a hobby.
 
 ## Licence and attribution
 
-Match data is © football-data.co.uk and used under their terms for personal,
-non-commercial analysis. The synthetic data generator produces numbers from
-plausible distributions, not real matches; never fit or evaluate a model on it.
+This is the one section that has to be exactly right, so it lists every
+external source the project touches, including the optional ones.
+
+**[football-data.co.uk](https://www.football-data.co.uk)**, maintained by
+Joseph Buchdahl. Match results and historical odds, and the upcoming-fixtures
+file the pre-match scan reads. © football-data.co.uk and used under their terms
+for personal, non-commercial analysis.
+
+**[Understat](https://understat.com)**. Expected goals, per-match line-ups and
+the season calendar the home page runs on. `fbedge/understat.py` reads the
+`getLeagueData` JSON endpoint the site's own page calls — this is scraping, not
+a published API, and calling it anything else would be dishonest. Every
+response is cached to disk so a backfill happens once: five leagues and nine
+seasons is forty-five requests. It is a free service run by somebody else and
+this project has no claim on it; if you fork this, keep the cache and the
+delay.
+
+**[openfootball/football.json](https://github.com/openfootball/football.json)**
+(optional). Season calendars as plain JSON, public domain, no key. Community
+maintained, so expect occasional gaps — it has a Champions League file for
+2024/25 and none for 2025/26.
+
+**[football-data.org](https://www.football-data.org)** (optional, free token).
+The alternative calendar source. Free tier: twelve competitions, ten calls a
+minute, delayed — the limit is enforced client-side here rather than left to
+the server to reject.
+
+**[API-Football](https://www.api-football.com)** (optional, free key). Club
+badges and injury news. Free tier: 100 requests a day resetting at 00:00 UTC,
+10 a minute, recent seasons only. Both limits are enforced locally with a
+persistent counter and a hard stop, because a spent budget at this endpoint
+does not always fail loudly.
+
+**Club badges are not redistributed.** They are third-party crests from a
+provider's CDN and `.gitignore` keeps them out of the repository for that
+reason, not for size. `crests.monogram` is why the app still looks finished
+without them.
+
+**The synthetic data generator** produces numbers from plausible distributions,
+not real matches; never fit or evaluate a model on it.

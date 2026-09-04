@@ -124,7 +124,7 @@ BOOKMAKERS: dict[str, str] = {
     "LB": "ladbrokes",
     "PP": "paddy_power",
     "CL": "coral",
-    "SK": "skybet",
+    "SKB": "skybet",
     "BF": "betfair_sportsbook",
     "BFD": "betfred",
     "IW": "interwetten",
@@ -140,8 +140,16 @@ BOOKMAKERS: dict[str, str] = {
 
 # Which prefixes ever carried totals and handicap prices. The rest are 1X2
 # only, and generating columns for them would just be dead weight.
-TOTALS_PREFIXES = ("P", "B365", "Max", "Avg", "GB")
-HANDICAP_PREFIXES = ("P", "B365", "Max", "Avg", "GB", "LB")
+#
+# **BFE was missing from both lists until 2026-09-04, and it mattered.** The
+# source has carried `BFE>2.5`/`BFE<2.5` and `BFEAHH`/`BFEAHA` since 2024/25,
+# and Betfair Exchange heads `backtest.FAIR_LINE_PREFERENCE` precisely because
+# an exchange's overround is a fraction of a bookmaker's. Leaving it out of
+# these two tuples meant the sharpest available benchmark was silently dropped
+# for totals and handicaps while being used for 1X2, so a single backtest
+# measured two markets against two different instruments. See BACKLOG B10.
+TOTALS_PREFIXES = ("P", "B365", "Max", "Avg", "GB", "BFE")
+HANDICAP_PREFIXES = ("P", "B365", "Max", "Avg", "GB", "LB", "BFE")
 
 # Bookmaker-specific handicap line columns, preferred over the market-wide
 # AHh when present, because a book's own line is what its prices refer to.
@@ -400,6 +408,94 @@ def resolve_team(query: str, known_teams: list[str]) -> str | None:
     return via_alias.pop() if len(via_alias) == 1 else None
 
 
+# Corporate and legal noise that carries no information about which club is
+# meant. Stripped from the *ends* of a name before comparing, so "FC Augsburg"
+# and "Augsburg" are one club while a club actually called "Milan" is not eaten
+# by the "AC" rule applied in the middle. Ordered longest-first so "1. FC" is
+# tried before "FC".
+#
+# Lifted out of `injuries.py`, where it was written for API-Football and then
+# needed verbatim for the openfootball calendar: 72 of 96 club names in that
+# feed differ from this project's only by a suffix like "FC" or "AFC".
+EXTERNAL_NAME_NOISE = (
+    "football club", "fussball club", "association", "calcio", "balompie",
+    "1. fc", "1.fc", "1 fc", "afc", "fsv", "tsg", "vfl", "vfb", "sv", "sc",
+    "fc", "cf", "ac", "as", "ss", "us", "rc", "sd", "ud", "cp", "cd", "aj",
+    "sco", "cfc", "rcd", "ca", "de", "1907", "1909", "1913", "1901", "07",
+    "05", "04", "29", "1899",
+)
+
+
+def external_name_key(name: str) -> str:
+    """A comparable form of a club name from somebody else's database.
+
+    Accents removed, punctuation dropped, corporate prefixes and suffixes
+    stripped, spacing collapsed. The point is only to make two spellings of one
+    club compare equal. **It is never used to decide that two different strings
+    are the same club**, which is what a similarity score would do - and which
+    the Understat integration established would silently merge Milan with
+    Inter.
+    """
+    text = _strip_accents(str(name)).lower()
+    text = "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in text)
+    words = text.split()
+    changed = True
+    while changed and words:
+        changed = False
+        for noise in EXTERNAL_NAME_NOISE:
+            parts = noise.split()
+            if len(words) > len(parts) and words[: len(parts)] == parts:
+                words, changed = words[len(parts):], True
+                break
+            if len(words) > len(parts) and words[-len(parts):] == parts:
+                words, changed = words[: -len(parts)], True
+                break
+    return " ".join(words)
+
+
+def resolve_external_team(
+    name: str, known: set[str] | list[str], aliases: dict[str, str] | None = None
+) -> str | None:
+    """Map another provider's club name onto this project's, or return None.
+
+    Four attempts, in decreasing confidence: the name as given; this module's
+    own alias table; a caller-supplied alias table for that provider's known
+    quirks; and a comparison after stripping corporate noise from both sides.
+
+    **No fuzzy fallback, and None is a real answer.** The caller reports it and
+    drops the row. A calendar with a silently unmapped team is a fixture that
+    never joins to anything, which looks exactly like a fixture that was never
+    scheduled - and this project has paid for that shape of bug before.
+    """
+    known = set(known)
+    if name in known:
+        return name
+
+    direct = canonical_team(name)
+    if direct in known:
+        return direct
+
+    for table in (aliases or {}, {}):
+        mapped = table.get(external_name_key(name))
+        if mapped and mapped in known:
+            return mapped
+
+    key = external_name_key(name)
+    if not key:
+        return None
+    for candidate in known:
+        if external_name_key(candidate) == key:
+            return candidate
+    # This module's own alias table, tried both as written and with the
+    # corporate noise stripped. "Manchester City FC" is not a key in it;
+    # "manchester city" is, and dropping the suffix is what finds it.
+    for lookup in (_alias_key(name), key):
+        via_alias = TEAM_ALIASES.get(lookup)
+        if via_alias in known:
+            return via_alias
+    return None
+
+
 def canonical_referee(name: str) -> str | None:
     """Tidy a referee name. Returns None for blanks so SQL sees NULL.
 
@@ -578,12 +674,30 @@ def extract_odds(raw: pd.DataFrame, matches: pd.DataFrame) -> pd.DataFrame:
         )
 
     df = raw.copy().reset_index(drop=True)
-    df.columns = [str(c).strip() for c in df.columns]
 
     # Select exactly the raw rows that survived filtering, in the same order
     # as the canonical matches frame.
     df = df.loc[matches["source_row"].to_numpy()].reset_index(drop=True)
-    keys = matches[["match_id"]].reset_index(drop=True)
+    return odds_long(df, matches["match_id"].reset_index(drop=True))
+
+
+def odds_long(
+    raw: pd.DataFrame, keys: pd.Series, key_name: str = "match_id"
+) -> pd.DataFrame:
+    """Reshape wide odds columns into long rows, keyed by whatever you supply.
+
+    Split out of `extract_odds` so the Phase 4 fixture snapshots can reuse it
+    verbatim. `fixtures.csv` uses exactly the same column conventions as a
+    season file but has no results and therefore no `match_id`, so its rows are
+    keyed by a content hash instead. Two readers of the same wide format would
+    drift apart - the away-handicap sign alone is a bug this project has
+    already paid for once - so there is only one.
+
+    `raw` must already be row-aligned with `keys`.
+    """
+    df = raw.copy().reset_index(drop=True)
+    df.columns = [str(c).strip() for c in df.columns]
+    keys = pd.Series(keys).reset_index(drop=True)
 
     records: list[pd.DataFrame] = []
 
@@ -591,10 +705,18 @@ def extract_odds(raw: pd.DataFrame, matches: pd.DataFrame) -> pd.DataFrame:
             negate_line=False):
         if price_col not in df.columns:
             return
+        # A handicap price whose line column is absent is not a price: nothing
+        # can settle "home at 1.95" without knowing the start. Storing it with
+        # a NULL line put ~98,500 unsettleable rows into the odds table, about
+        # a third of it - `price_selection` returns None for them, so they were
+        # dead weight rather than a wrong number, but a spec asking for a line
+        # column the file does not have should produce nothing. See BACKLOG B11.
+        if line_col is not None and line_col not in df.columns:
+            return
         price = pd.to_numeric(df[price_col], errors="coerce")
         frame = pd.DataFrame(
             {
-                "match_id": keys["match_id"],
+                key_name: keys,
                 "bookmaker": bookmaker,
                 "phase": phase,
                 "market": market,
@@ -630,23 +752,20 @@ def extract_odds(raw: pd.DataFrame, matches: pd.DataFrame) -> pd.DataFrame:
             line_col=line_col, negate_line=True,
         )
 
+    columns = [key_name, "bookmaker", "phase", "market", "selection", "line", "price"]
     if not records:
-        return pd.DataFrame(
-            columns=["match_id", "bookmaker", "phase", "market", "selection", "line", "price"]
-        )
+        return pd.DataFrame(columns=columns)
 
     odds = pd.concat(records, ignore_index=True)
     odds = odds[odds["price"] > 1.0]
 
     # A file may carry both the old and new Pinnacle column names; keep one row
-    # per (match, bookmaker, phase, market, selection, line).
+    # per (key, bookmaker, phase, market, selection, line).
     odds = odds.drop_duplicates(
-        subset=["match_id", "bookmaker", "phase", "market", "selection", "line"],
+        subset=[key_name, "bookmaker", "phase", "market", "selection", "line"],
         keep="first",
     )
-    return odds[
-        ["match_id", "bookmaker", "phase", "market", "selection", "line", "price"]
-    ].reset_index(drop=True)
+    return odds[columns].reset_index(drop=True)
 
 
 def normalize_league_season(
