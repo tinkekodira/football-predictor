@@ -29,7 +29,7 @@ error, so they are worth knowing about before trusting a result:
 
 ## Current status
 
-- 317 tests passing (`python -m pytest`).
+- 341 tests passing (`python -m pytest`).
 - **The CLV measurement was broken, and is now fixed and re-baselined.** A
   benchmark change in 2024 plus favourite-longshot bias in multiplicative
   margin removal inflated every historical CLV figure. `margin_method` now
@@ -409,7 +409,78 @@ beatable.
 
 ---
 
-## What was added in the hierarchical session (most recent)
+## What was added in the home-page session (most recent)
+
+A calendar home page, in the shape of a live-scores site: scroll a date, see
+every fixture in the top five leagues on it, click one for the detail page that
+already existed.
+
+- `fbedge/fixtures.py` - the season calendar, played and unplayed, from
+  Understat. UTC in, local dates out.
+- `scripts/build_fixtures.py` - populates the new `fixtures` table.
+- `home_view.py` - the page itself, at the repo root rather than under
+  `fbedge/` so that nothing importable by a model or a test pulls in Streamlit.
+- `app.py` - now a two-view router. The calendar is what opens; the fixture
+  page is what a click on it opens, seeded from the fixture that was clicked.
+- `tests/test_fixtures.py` (21) and three more in `tests/test_app.py`.
+  **341 tests**, from 317.
+
+### The source question, which was the whole difficulty
+
+**football-data.co.uk cannot supply a calendar.** It is the project's primary
+source and it does publish `fixtures.csv` - `ingest.download_upcoming_fixtures`
+already fetched it - but that file is a *price* feed. On the day this was
+built it held 48 rows spanning three days, **two of them** in the top five
+leagues. It can never answer "what is on in October".
+
+**Understat can, and was already integrated.** Its league payload carries the
+whole season in `dates`, played and unplayed alike: 1,752 fixtures across the
+five leagues for 2026/27, running to 30 May 2027. No new source, no new
+dependency, and the team-name aliases were already derived and tested.
+
+Three things that would be wrong if reversed:
+
+- **`understat.match_frame` drops unplayed fixtures and must keep doing so.**
+  An unplayed match carries a scoreline of null and an xG of **zero**, not a
+  missing one. `fixtures.fixture_frame` is its mirror image and writes NULL for
+  both. `test_unplayed_fixtures_carry_null_not_zero` is the guard; without it,
+  twenty teams of "failed to have a shot" would flow into the ratings.
+- **Kick-offs are stored in UTC and converted on the way out.** Understat gives
+  19:00 for a match that starts at 21:00 in Zagreb. Storing local time would
+  bake one reader's timezone into the database; grouping on the *UTC* date
+  would scatter one matchday across two and look like missing fixtures.
+- **The calendar is re-fetched, not merged.** A result arrives by *changing* a
+  row from unplayed to played, so an insert-only load would keep the stale row
+  and show a finished match as still to come, next to itself. The delete is
+  scoped to the seasons and leagues actually supplied.
+
+### What the right-hand panels can and cannot honestly claim
+
+The brief asked for injury news. **There is no news source in this project, and
+none was invented.**
+
+- **Highlighted matches** is real: the model prices every fixture on the day
+  from ratings fitted only on earlier matches, and shows where it has a strong
+  but non-obvious opinion. It is labelled as opinion, not edge - odds exist
+  only a few days ahead, and this model has never beaten a closing line.
+- **Availability watch** is derived, not reported. It reuses
+  `availability.for_fixture`, the same point-in-time windowing the null result
+  was measured with, rather than a second version written for display. It says
+  plainly that it cannot tell an injury from a rested player and cannot know
+  about this morning.
+- **News** says it has no source. Filling it with something that looked like
+  news would have been the worst available outcome.
+
+### Still needed for the page to be fully populated
+
+1. `python scripts/build_rosters.py --league E0` with the app stopped -
+   `match_lineups` holds **83 rows**, so the availability panel currently has
+   nothing to derive from. The earlier session's backfill cached 3,430 matches
+   but the write never landed.
+2. Odds for upcoming fixtures stop at the football-data horizon of about three
+   days, so most future dates carry no market comparison at all.
+
+## What was added in the hierarchical session
 
 An attempt to stop *choosing* the shrinkage and start fitting it. **Built,
 measured, and rejected** - and the way it fails is more useful than the feature
