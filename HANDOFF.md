@@ -15,9 +15,21 @@ gambling-adjacent, and nobody should stake real money on it.
 
 ---
 
+## Known bugs live in BACKLOG.md, not here
+
+`BACKLOG.md` in the repo root registers defects that were confirmed by reading
+the code and then deliberately left unfixed. Check it before investigating
+anything that looks like a bug, and add to it rather than to this file when you
+shelve one. Two of its entries silently produce a wrong number rather than an
+error, so they are worth knowing about before trusting a result:
+`fair_line_preference` does not actually pin the benchmark (B1), and
+`build_xg.py` locks the database for the length of a download (B2).
+
+---
+
 ## Current status
 
-- 288 tests passing (`python -m pytest`). Was 205 at the start of the day.
+- 317 tests passing (`python -m pytest`).
 - **The CLV measurement was broken, and is now fixed and re-baselined.** A
   benchmark change in 2024 plus favourite-longshot bias in multiplicative
   margin removal inflated every historical CLV figure. `margin_method` now
@@ -35,6 +47,12 @@ gambling-adjacent, and nobody should stake real money on it.
   coefficients carry the predicted sign in all six specifications and none
   reaches two standard errors; turning it on moves log loss by 0.00004. See the
   availability section for what that does and does not rule out.
+- **Fitting the shrinkage instead of choosing it was built, measured and
+  rejected.** Empirical Bayes says the ridge should be 11-13, not 1; applied, it
+  costs 0.008 log loss and loses on 4 of 4 held-out leagues, with the
+  calibration slope blowing out to 1.7-2.2 exactly as that diagnostic predicted
+  in advance. The estimator is correct; the question it answers is not the one
+  the model needs. See the hierarchical section.
 - Phase 3 backtest and hyperparameter tuner have both been run against real
   data on the Premier League.
 - **No demonstrated edge**, and the current era is measurably *negative*. See
@@ -391,7 +409,117 @@ beatable.
 
 ---
 
-## What was added in the availability session (most recent)
+## What was added in the hierarchical session (most recent)
+
+An attempt to stop *choosing* the shrinkage and start fitting it. **Built,
+measured, and rejected** - and the way it fails is more useful than the feature
+would have been.
+
+- `fbedge/models/hierarchical.py` - empirical Bayes for the ridge, by EM with a
+  Laplace approximation. Separate variances for attack and defence, a
+  quasi-Poisson dispersion correction, and `pool_variances` for the second
+  level across leagues.
+- `fbedge/models/base.py` - `ridge_penalty` now takes a scalar *or* an
+  `(attack, defence)` pair. A scalar behaves exactly as before.
+- `fbedge/models/goals.py` - `ridge="auto"` and `ridge="auto-split"`;
+  `GoalsModel.ridge_pair` and `.ridge_estimate`.
+- `scripts/shrinkage_report.py` - what the data says the shrinkage should be.
+- `scripts/validate_setting.py` - `--ridge` now takes the automatic modes.
+- `tests/test_hierarchical.py` - 26 tests. 317 in total, from 291.
+
+### The premise, which is correct
+
+The ridge penalty is a Gaussian prior in disguise. `ridge_penalty` adds
+`lambda * sum((beta - prior)^2)` to the negative log-likelihood, which is the
+log posterior of a model where each team's strength is drawn from
+`N(prior, tau^2)` with `lambda = 1 / (2 * tau^2)`. So the shipped ridge of 1.0
+is a *claim*: that team strengths have a standard deviation of 0.71 in log-rate
+space. Nobody had checked it, and `tau` is estimable from the same data the
+strengths are.
+
+### The result: decisively worse, in the direction the slope predicted
+
+`scripts/validate_setting.py --from 2018-08-01 --target blend --ridge 1
+auto-split auto`, against the shipped `goals r5` baseline:
+
+| setting | mean delta log loss | SE | t | better in | slope range |
+|---|---|---|---|---|---|
+| blend0.5 r1 (ships today) | -0.00325 | 0.00014 | -23.7 | 4/4 | 0.96-1.23 |
+| blend0.5 auto-split | -0.00326 | 0.00013 | -24.8 | 4/4 | 0.96-1.22 |
+| **blend0.5 auto** | **+0.00824** | 0.00179 | **+4.6** | **0/4** | **1.67-2.23** |
+
+Empirical Bayes estimates `lambda` between 11 and 13 in every league, against a
+shipped 1.0, and left to iterate it climbs to the upper bound. Applied, it
+costs 0.008 log loss and loses in every league including the one it was
+developed on.
+
+**The calibration slope called it in advance, which is the part worth
+believing.** A slope above 1 means probabilities packed too tightly - the model
+under-confident. That diagnostic is what found the original shrinkage win. Here
+it says `auto` should be badly over-shrunk, and out of sample the slope lands
+at 1.67 to 2.23 against 0.96 to 1.23 for the setting that ships. Same
+mechanism, same direction, opposite sign of outcome. Two independent diagnostics
+agreeing about a *rejection* is as good as this project's evidence gets.
+
+### Why it fails, which is the actual finding
+
+**The estimator is not broken.** `test_recovers_a_planted_prior_variance`
+builds leagues whose `tau` is known, at realistic size, and recovers it. Without
+that test "empirical Bayes disagrees with the holdout" would be
+indistinguishable from a coding error, and it is the same power-test discipline
+the goals-shape nulls needed.
+
+The two calculations answer different questions. Empirical Bayes asks which
+prior best explains the *training* data under the model as written. The model as
+written says the time-weighted likelihood is a real likelihood over about 300
+observations - `effective_n` is 248 to 301 across the five leagues, against 2400
+to 3000 actual matches. Under that reading a team's strength is barely resolved,
+most of the observed spread must be noise, and the right move is to shrink it
+away. Hence `lambda` above 10.
+
+**That reading is wrong, and specifically wrong.** The time weights discount old
+matches because strength *drifts*, not because those matches were noisy. A match
+from two years ago carries real information about a team today; the weight says
+how much to trust it as a description of the present, not how much signal it
+contains. Treat the discount as a statement about noise and you conclude the
+model knows far less than it does.
+
+There is no interior fixed point, either: both terms of the EM update shrink as
+the penalty rises, so nothing pushes back. Run for 30 rounds it reaches the
+bound in three leagues of five. `test_the_loop_runs_away_on_a_flat_likelihood`
+pins that, so a later change that makes the loop settle can be told from one
+that hides the problem. See BACKLOG.md B9.
+
+### The one part that survived, and it is too small to matter
+
+The *level* of shrinkage is what the misspecification corrupts. The *balance*
+between attack and defence is a comparison of two parameter blocks inside one
+fit on one likelihood scale, so whatever distorts the level distorts both sides
+and largely cancels. That was worth testing separately, and it is what
+`auto-split` does: keep the validated level, take only the split from the data.
+
+It is real and consistent - attack strengths spread more than defensive ones in
+5 of 5 leagues and in 19 of 19 league-windows tested. It is also tiny: the
+implied split is 0.92/1.09 around 1.0, and the ridge plateau from 0.1 to 1.0
+spans 0.0008 log loss. So it lands where the size predicted, at **-0.00326
+against -0.00325** - a difference of 0.00001, identical to four decimals in
+every league.
+
+That is a no-op, not a win. It stays available and off, because an extra fit per
+refit for nothing is not worth defaulting to.
+
+### Nothing about the defaults changed
+
+`blend 0.5` at `ridge 1.0` still ships. What this session bought is the
+knowledge that the shipped value cannot be justified as a prior on team
+strengths, and that this does not matter because the ridge is not functioning as
+one. **What would actually address it** is modelling strength as a state that
+evolves - a random walk, with the innovation variance estimated - rather than a
+fixed effect fitted to discounted data. That would replace the half-life with
+something fitted too. It is a rebuild of `models/goals.py`, and it is now the
+best-motivated large change on the list.
+
+## What was added in the availability session
 
 Player availability from Understat line-ups, built, measured, and **left
 switched off**, because it does not earn its place.

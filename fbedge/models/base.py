@@ -366,14 +366,28 @@ def ridge_penalty(
     defence: np.ndarray,
     attack_prior: np.ndarray,
     defence_prior: np.ndarray,
-    strength: float,
+    strength: float | tuple[float, float],
 ):
     """Penalty value and its gradient. Behaves like `strength` pseudo-matches
-    of evidence that every team is exactly at its prior."""
+    of evidence that every team is exactly at its prior.
+
+    `strength` may be a single number, or a pair applying separately to attack
+    and defence. The pair exists because `models.hierarchical` estimates the
+    two spreads from the data and they do not come out equal - defensive
+    strength is the less variable of the two - and a single value has to split
+    the difference. A scalar keeps behaving exactly as it always did.
+    """
+    if np.isscalar(strength):
+        attack_strength = defence_strength = float(strength)
+    else:
+        attack_strength, defence_strength = (float(v) for v in strength)
     attack_gap = attack - attack_prior
     defence_gap = defence - defence_prior
-    value = strength * (np.sum(attack_gap**2) + np.sum(defence_gap**2))
-    return value, 2 * strength * attack_gap, 2 * strength * defence_gap
+    value = (
+        attack_strength * np.sum(attack_gap**2)
+        + defence_strength * np.sum(defence_gap**2)
+    )
+    return value, 2 * attack_strength * attack_gap, 2 * defence_strength * defence_gap
 
 
 def minimise(

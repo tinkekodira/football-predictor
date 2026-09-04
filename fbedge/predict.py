@@ -151,7 +151,7 @@ def build_models(
     league: str,
     as_of: dt.date,
     half_life_days: float = base.DEFAULT_HALF_LIFE_DAYS,
-    ridge: float | None = None,
+    ridge: float | tuple[float, float] | str | None = None,
     use_cache: bool = True,
     fit_counts: bool = True,
     target: str | None = None,
@@ -197,9 +197,10 @@ def build_models(
         notes.append("The goals model did not fully converge; treat prices as indicative.")
 
     # The count models take a concrete number, and `ridge` may still be None
-    # here meaning "whatever suits the target". The goals fit has already
-    # resolved it, so reuse that rather than resolving it twice and risking
-    # the two disagreeing after a fallback.
+    # here meaning "whatever suits the target", a pair, or one of the automatic
+    # modes that only a fit can resolve. The goals fit has already reduced all
+    # of those to a single number, so reuse that rather than resolving it twice
+    # and risking the two disagreeing after a fallback.
     ridge = goals_model.ridge
 
     optional: dict[str, counts.CountModel | None] = {"corners": None, "cards": None}
@@ -263,7 +264,7 @@ def predict_fixture(
     league: str | None = None,
     referee: str | None = None,
     half_life_days: float = base.DEFAULT_HALF_LIFE_DAYS,
-    ridge: float | None = None,
+    ridge: float | tuple[float, float] | str | None = None,
     max_goals: int = 12,
     target: str | None = None,
     blend_weight: float = base.DEFAULT_BLEND_WEIGHT,

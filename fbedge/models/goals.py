@@ -16,6 +16,9 @@ prices, all of them automatically consistent with each other.
 What it does not include: xG (not in the free data source), lineups, injuries,
 or European fixture congestion. Those are Phase 5.
 """
+# `hierarchical` is imported for `ridge="auto"`, which replaces the hand-chosen
+# shrinkage with one estimated from the data. It imports only `base`, so there
+# is no cycle.
 
 from __future__ import annotations
 
@@ -26,7 +29,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from . import base
+from . import base, hierarchical
 from .base import (
     ConvergenceWarning,
     InsufficientData,
@@ -112,6 +115,18 @@ class GoalsModel:
     # (0.0, 0.0) means the model was fitted without availability and `rates`
     # then ignores whatever it is passed, so callers need not know either way.
     availability_beta: tuple[float, float] = (0.0, 0.0)
+    # The separate attack and defence penalties actually applied. Equal to
+    # `(ridge, ridge)` for a scalar request; different only when one of the
+    # automatic modes estimated them. `ridge` itself stays a single number in
+    # every case, being what the count models are handed and what every
+    # existing caller reads. `fit_goals_model` always sets this, so the default
+    # is only ever seen by a model somebody built by hand.
+    ridge_pair: tuple[float, float] = (0.0, 0.0)
+    # The empirical-Bayes record, when shrinkage was estimated rather than
+    # given. Carried on the model because a fitted hyperparameter needs its
+    # provenance attached: whether the loop converged and what spread of team
+    # strengths it implies are the two things that say whether to believe it.
+    ridge_estimate: "hierarchical.RidgeEstimate | None" = None
 
     # ----------------------------------------------------------------
     # Prediction
@@ -515,9 +530,97 @@ def fit_availability_effect(
     return float(result.x[0]), float(result.x[1])
 
 
+# Estimate both the level of shrinkage and its split between attack and
+# defence from the data. Measured and *rejected* - see BACKLOG.md B9 and the
+# hierarchical section of HANDOFF.md. Kept because the estimator is correct and
+# the reason it loses is worth being able to reproduce, not because it is a
+# setting anyone should choose.
+AUTO_RIDGE = "auto"
+
+# Keep the validated level and take only the attack/defence split from the
+# data. The defensible half of the same idea.
+AUTO_SPLIT_RIDGE = "auto-split"
+
+AUTO_MODES = (AUTO_RIDGE, AUTO_SPLIT_RIDGE)
+
+
+def _scalar_ridge(pair: tuple[float, float]) -> float:
+    """One number standing for a possibly-unequal pair.
+
+    Needed because `GoalsModel.ridge` is read by callers that want a single
+    number - the count models multiply it by their own factor - and turning
+    that into a pair everywhere would spread a hierarchical detail across code
+    that has no use for it. The geometric mean, because the quantity is a
+    precision and its natural scale is logarithmic; it is also what
+    `hierarchical.pool_variances` averages on, so the two agree.
+    """
+    return float(np.sqrt(pair[0] * pair[1]))
+
+
+def _estimate_ridge(
+    training: TrainingSet,
+    n_teams: int,
+    response: tuple[np.ndarray, np.ndarray],
+    fit_at,
+) -> hierarchical.RidgeEstimate:
+    """Build the EM step: refit at a penalty, report the variances it implies.
+
+    The EM step is "fit at the current penalty, look at how far the strengths
+    actually spread, and set the penalty that spread implies". `fit_at` is
+    passed in rather than rebuilt so the rounds and the final fit are provably
+    the same computation at different penalties.
+
+    Priors are rebuilt here rather than taken from the objective because the
+    update measures each strength's distance from *its own* prior, and a
+    promoted team's prior is not zero.
+    """
+    attack_prior, defence_prior = build_priors(training)
+
+    def step(pair: tuple[float, float]):
+        result = fit_at(pair)
+        intercept, home_advantage, attack, defence, _ = unpack_core(result.x, n_teams)
+        variance_attack, variance_defence, scale = hierarchical.posterior_state(
+            training,
+            np.asarray(attack, dtype=float),
+            np.asarray(defence, dtype=float),
+            float(intercept),
+            float(home_advantage),
+            pair,
+            response,
+        )
+        return (
+            hierarchical.variance_update(attack - attack_prior, variance_attack),
+            hierarchical.variance_update(defence - defence_prior, variance_defence),
+            scale,
+        )
+
+    return step
+
+
+def _split_estimate(step, level: float) -> hierarchical.RidgeEstimate:
+    """One fit at `level`, then move attack and defence apart by what it says.
+
+    No iteration, and so none of the runaway the full loop suffers: the level
+    is pinned to the value that was validated, and only the balance is read off
+    the data. Costs exactly one extra fit.
+    """
+    tau2_attack, tau2_defence, scale = step((level, level))
+    pair = hierarchical.split_ridge(tau2_attack, tau2_defence, level)
+    return hierarchical.RidgeEstimate(
+        attack=pair[0],
+        defence=pair[1],
+        tau_attack=float(np.sqrt(tau2_attack)),
+        tau_defence=float(np.sqrt(tau2_defence)),
+        dispersion=float(scale),
+        rounds=1,
+        converged=True,
+        history=((level, level), pair),
+    )
+
+
 def fit_goals_model(
     training: TrainingSet,
-    ridge: float | None = None,
+    ridge: float | tuple[float, float] | str | None = None,
     half_life_days: float = base.DEFAULT_HALF_LIFE_DAYS,
     use_dixon_coles_correction: bool = True,
     target: str | None = None,
@@ -535,6 +638,12 @@ def fit_goals_model(
     runs in two stages - strengths from the chosen target with the Dixon-Coles
     correction switched off, then level, home advantage and rho re-estimated on
     real goals by `recalibrate_on_goals`. See that function for why.
+
+    `ridge` takes a number, a `(attack, defence)` pair, `None` for the value
+    that suits the target, or `"auto"` to estimate it from the data by
+    empirical Bayes - see `models.hierarchical`. `"auto"` costs a handful of
+    extra fits, since each round of the EM refits the strengths, and it is the
+    only setting that can differ between leagues without anyone choosing so.
     """
     # `target=None` means "the default, and adapt if the data cannot support
     # it"; naming a target explicitly is a promise the caller wants kept, so
@@ -553,7 +662,15 @@ def fit_goals_model(
         )
 
     # None means "whatever suits this target"; an explicit value always wins.
-    if ridge is None:
+    mode = ridge if isinstance(ridge, str) else None
+    if mode is not None and mode not in AUTO_MODES:
+        raise ValueError(
+            f"Unknown ridge {ridge!r}; use a number, a pair, "
+            f"or one of {AUTO_MODES}."
+        )
+    if ridge is None or mode is not None:
+        # The automatic modes still need a starting level, and it is the same
+        # target-aware value everything else defaults to.
         ridge = base.default_ridge(target)
 
     frame = training.frame
@@ -575,14 +692,28 @@ def fit_goals_model(
     # The correction describes how discrete goals clump, so it is only fitted
     # in the first stage when the first stage is itself about goals.
     first_stage_dc = use_dixon_coles_correction and target == "goals"
-    objective, start, bounds = build_goals_objective(
-        training,
-        ridge=ridge,
-        use_dixon_coles_correction=first_stage_dc,
-        response=responses(training, target, blend_weight),
-    )
+    response = responses(training, target, blend_weight)
 
-    result = minimise(objective, start, bounds=bounds)
+    def fit_at(penalty) -> "object":
+        objective, start, bounds = build_goals_objective(
+            training,
+            ridge=penalty,
+            use_dixon_coles_correction=first_stage_dc,
+            response=response,
+        )
+        return minimise(objective, start, bounds=bounds)
+
+    estimate = None
+    if mode is not None:
+        step = _estimate_ridge(training, n_teams, response, fit_at)
+        estimate = (
+            hierarchical.empirical_bayes_ridge(step)
+            if mode == AUTO_RIDGE
+            else _split_estimate(step, float(ridge))
+        )
+        ridge = estimate.pair
+
+    result = fit_at(ridge)
     if not result.success:
         warnings.warn(
             f"Goals model for {training.league} did not converge: {result.message}",
@@ -607,6 +738,7 @@ def fit_goals_model(
             training, attack, defence, intercept, home_advantage, rho
         )
 
+    ridge_pair = hierarchical.as_pair(ridge)
     return GoalsModel(
         league=training.league,
         as_of=training.as_of,
@@ -617,7 +749,9 @@ def fit_goals_model(
         home_advantage=float(home_advantage),
         rho=rho,
         half_life_days=half_life_days,
-        ridge=ridge,
+        ridge=_scalar_ridge(ridge_pair),
+        ridge_pair=ridge_pair,
+        ridge_estimate=estimate,
         target=target,
         n_matches=training.n_matches,
         effective_n=training.effective_n,

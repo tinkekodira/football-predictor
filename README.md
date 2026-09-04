@@ -126,6 +126,7 @@ fbedge/
   models/
     base.py      time decay, ridge priors, point-in-time training sets
     goals.py     Dixon-Coles: attack, defence, home advantage, low-score fix
+    hierarchical.py  estimating the shrinkage instead of choosing it
     counts.py    negative binomial corners and cards, with referee effects
   markets.py     score matrix -> every goal market; count totals
   pricing.py     implied probability, margin removal, expected value
@@ -218,6 +219,16 @@ as the best team in Europe, and it is why the model produces a sane number in
 August at all. Newly promoted clubs are shrunk towards a deliberately
 pessimistic prior rather than the league average, because "unknown" and
 "average" are not the same claim.
+
+The strength of that penalty is *chosen*, not fitted, and `models/hierarchical.py`
+exists because that looked like an obvious gap. It is not: the ridge is
+algebraically a Gaussian prior on team strengths, so the prior variance can be
+estimated by empirical Bayes, and doing so gives an answer that is decisively
+worse out of sample - 0/4 held-out leagues, with the calibration slope blowing
+out to 1.7-2.2. The estimator is right and the question it answers is subtly
+the wrong one; the module docstring and the hierarchical section of HANDOFF.md
+explain why. `ridge="auto"` is kept so the disagreement can be reproduced, and
+should stay off.
 
 Both knobs are exposed in the app's sidebar and on the command line. The
 defaults are conventional values from the literature; Phase 3 will tune them by

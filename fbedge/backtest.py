@@ -86,7 +86,7 @@ class BacktestConfig:
     half_life_days: float = base.DEFAULT_HALF_LIFE_DAYS
     # None resolves to the shrinkage that suits `target`; see
     # models.base.RECOMMENDED_RIDGE for why one value cannot serve both.
-    ridge: float | None = None
+    ridge: float | tuple[float, float] | str | None = None
     markets: tuple[str, ...] = BETTABLE_MARKETS
     price_source: tuple[str, ...] = DEFAULT_PRICE_SOURCE
     closing_source: tuple[str, ...] = DEFAULT_CLOSING_SOURCE

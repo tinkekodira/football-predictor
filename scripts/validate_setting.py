@@ -33,7 +33,14 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from fbedge import backtest, config, database, evaluation  # noqa: E402
-from fbedge.models import base as model_base  # noqa: E402
+from fbedge.models import base as model_base, goals  # noqa: E402
+
+
+def _ridge(value: str):
+    """A number, or one of the names that means "estimate it"."""
+    if value in goals.AUTO_MODES:
+        return value
+    return float(value)
 
 
 def run_one(con, league, start, end, step_days, market, target, blend_weight,
@@ -82,7 +89,9 @@ def main() -> int:
                              "--ridge is run so a combined gain can be "
                              "attributed to the target or to the shrinkage")
     parser.add_argument("--blend-weight", type=float, default=0.5)
-    parser.add_argument("--ridge", type=float, nargs="+", default=[1.0])
+    parser.add_argument("--ridge", type=_ridge, nargs="+", default=[1.0],
+                        help="numbers, or 'auto' / 'auto-split' to estimate "
+                             "shrinkage from the data (models.hierarchical)")
     parser.add_argument("--half-life", type=float, default=model_base.DEFAULT_HALF_LIFE_DAYS)
     parser.add_argument("--selection-league", default="E0",
                         help="The league the candidate was chosen on; judged separately")
@@ -102,9 +111,10 @@ def main() -> int:
     end = dt.date.fromisoformat(args.end) if args.end else dt.date.today()
     leagues = args.leagues or sorted(config.LEAGUES)
 
-    def label_of(target: str, ridge: float) -> str:
+    def label_of(target: str, ridge) -> str:
         name = target if target != "blend" else f"blend{args.blend_weight:g}"
-        return f"{name} r{ridge:g}"
+        shown = ridge if isinstance(ridge, str) else f"r{ridge:g}"
+        return f"{name} {shown}"
 
     combos = [(t, r) for t in args.target for r in args.ridge]
     baseline_key = ("goals", model_base.DEFAULT_RIDGE)
