@@ -47,11 +47,11 @@ error, so they are worth knowing about before trusting a result:
   coefficients carry the predicted sign in all six specifications and none
   reaches two standard errors; turning it on moves log loss by 0.00004. See the
   availability section for what that does and does not rule out.
-- **That null is now under challenge.** Retested with real injury data instead
-  of the line-up proxy, *newly* missing players are worth about **-7% on the
-  scoring rate each** (z = -2.67) while the count of everyone currently out is
-  worth nothing - exactly the split the "the model has already adapted"
-  argument predicted. One season of one league so far. See the retest section.
+- **That null half-survived a retest on real injury data.** Across five
+  leagues, a team's *own* absentees are worth -1.8% per player (z = -1.87, not
+  significant), but its *opponent's* are worth +1.5% to +2.7% (z = 2.6 to 3.0,
+  right sign in 4-5 leagues of 5). The -7.7% first reported from one season of
+  E0 did not replicate. See the retest section.
 - **Fitting the shrinkage instead of choosing it was built, measured and
   rejected.** Empirical Bayes says the ridge should be 11-13, not 1; applied, it
   costs 0.008 log loss and loses on 4 of 4 held-out leagues, with the
@@ -414,7 +414,7 @@ beatable.
 
 ---
 
-## The availability retest: the first result that looks like a real signal
+## The availability retest: a small, consistent opponent effect
 
 `scripts/injury_signal.py`, on real injury data rather than the line-up proxy.
 **This is one season of one league and must not be believed yet**, but it is
@@ -455,7 +455,45 @@ it would: the state is noise, the change is signal.
 original availability study and worth understanding rather than glossing: a
 weakened opponent does not appear to concede more, only to score less.
 
-### Why this is not yet a result
+### REPLICATED ON FIVE LEAGUES, AND THE HEADLINE SHRANK
+
+**The -7.7% did not hold up.** Read this before the single-season section
+above, which is kept only so the shrinkage is visible.
+
+`scripts/injury_signal.py --leagues E0 SP1 I1 D1 F1 --from 2022-08-01
+--to 2024-06-01`, 2,472 to 2,921 matches per specification:
+
+| specification | beta_own | z | signs | beta_opp | z | signs |
+|---|---|---|---|---|---|---|
+| newly out | -0.018 | -1.87 | 4/5 | **+0.027** | **+2.86** | 4/5 |
+| newly out or doubtful | -0.018 | -1.87 | 4/5 | **+0.024** | **+2.69** | 4/5 |
+| all currently out | -0.009 | -1.68 | 4/5 | +0.015 | +2.64 | **5/5** |
+| all currently out or doubtful | -0.007 | -1.25 | 4/5 | +0.016 | **+3.03** | **5/5** |
+
+Three things follow, and the first is a correction.
+
+1. **`beta_own` is not significant and the first number was inflated.** One
+   season of E0 gave -7.7%; three seasons of E0 gave -4.6%; five leagues pool
+   to **-1.8%, z = -1.87**. That is the ordinary fate of a first result, and it
+   is why nothing was built on it.
+2. **The consistent finding is the opponent, not the team itself.** A side
+   whose *opponent* is missing players scores about 1.5% to 2.7% more per
+   player, at z = 2.6 to 3.0, with the right sign in 4 or 5 leagues of 5 in
+   every specification. That is the opposite emphasis from the single-season
+   read, where `beta_opp` looked flat.
+3. **The mechanism argument was half right.** "Newly out" really does carry
+   about twice the coefficient of "everyone currently out" on both sides
+   (-0.018 against -0.009; +0.027 against +0.015), which is what "the model has
+   already adapted to a long-term absentee" predicts. The prediction was about
+   the *ratio* and it held; it was not a prediction that either would be large.
+
+**Net: the availability null survives for a team's own absentees, and does not
+survive for its opponent's.** An effect of 1.5-2.7% per missing player is real
+but small - for scale, the goals/xG blend and shrinkage change together bought
+0.0033 of log loss - and it is still an effect rather than an edge, for the
+timing reason below.
+
+### Why this is still not something to build on
 
 - **One season, one league.** 343 matches. The free plan covers 2022-2024 for
   all five leagues, so this can be roughly fifteen times larger for fourteen

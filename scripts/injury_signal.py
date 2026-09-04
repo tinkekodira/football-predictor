@@ -197,14 +197,19 @@ def attach(totals: pd.DataFrame, matches: pd.DataFrame,
     return frame, float(joined.mean()) if len(frame) else 0.0
 
 
-def report(frame: pd.DataFrame, label: str, bootstrap: int, seed: int) -> None:
-    """Fit and print one specification."""
+def report(frame: pd.DataFrame, label: str, bootstrap: int, seed: int) -> dict | None:
+    """Fit and print one specification, and hand the estimates back.
+
+    Returned rather than only printed so that several leagues can be pooled
+    without anyone retyping numbers off a terminal - which is how a table
+    ends up disagreeing with the run that produced it.
+    """
     usable = frame.dropna(
         subset=["home_out", "away_out", "model_home_rate", "model_away_rate"]
     )
     if usable.empty:
         print(f"  {label}: nothing left after the join.")
-        return
+        return None
 
     # One row per team per match: the attacking side, its own absentees and its
     # opponent's.
@@ -260,11 +265,22 @@ def report(frame: pd.DataFrame, label: str, bootstrap: int, seed: int) -> None:
               f"   ({value * 100:+.1f}% on the rate per player)")
     detectable = 2 * errors[1] * 100 if np.isfinite(errors[1]) else float("nan")
     print(f"    detectable at 2 SE: {detectable:.1f}% per missing player")
+    return {
+        "matches": len(usable),
+        "beta_own": float(point[1]), "se_own": float(errors[1]),
+        "beta_opp": float(point[2]), "se_opp": float(errors[2]),
+    }
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--league", choices=sorted(config.LEAGUES), default="E0")
+    parser.add_argument(
+        "--leagues", nargs="+", choices=sorted(config.LEAGUES), default=None,
+        help="run several leagues and pool them. One league on its own is far "
+             "too small to read: the first pass on a single season of E0 gave "
+             "-7.7 percent and the same league over three seasons gave -4.6.",
+    )
     parser.add_argument("--from", dest="start", required=True)
     parser.add_argument("--to", dest="end", default=None)
     parser.add_argument("--step-days", type=int, default=7)
@@ -288,43 +304,101 @@ def main() -> int:
 
     start = dt.date.fromisoformat(args.start)
     end = dt.date.fromisoformat(args.end) if args.end else dt.date.today()
+    leagues = args.leagues or [args.league]
 
-    print(f"Refitting {config.LEAGUES[args.league]} week by week...")
+    collected: dict[str, list[dict]] = {}
+    for league in leagues:
+        for label, values in run_league(con, league, start, end, args):
+            collected.setdefault(label, []).append(values)
+    con.close()
+
+    if len(leagues) > 1:
+        pool(collected)
+
+    print("\n  Reminder: this measures whether absences move scoring. It does "
+          "not\n  establish the information was knowable before the price - see "
+          "the\n  docstring.")
+    return 0
+
+
+def pool(collected: dict[str, list[dict]]) -> None:
+    """Inverse-variance pool across leagues, one row per specification.
+
+    Pooling is not here to manufacture significance out of five small studies.
+    It is here because a per-league table invites picking the league that
+    agrees with you, which is exactly the multiple-comparisons trap this
+    project warns about for this shape of question.
+
+    **Read the `signs` column before the z.** Five leagues agreeing weakly is
+    better evidence than one league shouting, and this study has already shown
+    why: a single season of E0 gave -7.7 percent, and the same league over
+    three seasons gave -4.6.
+    """
+    print(f"\n{'=' * 78}")
+    print("  POOLED ACROSS LEAGUES  (inverse-variance weighted)")
+    print(f"{'=' * 78}")
+    print(f"  {'specification':32s} {'beta_own':>9s} {'z':>6s} {'signs':>6s} "
+          f"{'beta_opp':>9s} {'z':>6s} {'signs':>6s}")
+    for label, entries in collected.items():
+        pieces = [f"  {label:32s}"]
+        for name, expected in (("own", -1.0), ("opp", 1.0)):
+            betas = np.array([v[f"beta_{name}"] for v in entries])
+            errors = np.array([v[f"se_{name}"] for v in entries])
+            good = np.isfinite(betas) & np.isfinite(errors) & (errors > 0)
+            if not good.any():
+                pieces.append(f" {'n/a':>9s} {'':>6s} {'':>6s}")
+                continue
+            weights = 1.0 / errors[good] ** 2
+            mean = float(np.sum(weights * betas[good]) / np.sum(weights))
+            error = float(1.0 / np.sqrt(np.sum(weights)))
+            agreeing = int(np.sum(np.sign(betas[good]) == expected))
+            pieces.append(
+                f" {mean:+9.4f} {mean / error:+6.2f} "
+                f"{agreeing:>3d}/{int(good.sum()):<2d}"
+            )
+        print("".join(pieces))
+    print("\n  `signs` counts leagues whose estimate carries the predicted "
+          "direction:\n  a side missing players scores less, its opponent more.")
+
+
+def run_league(con, league: str, start, end, args) -> list[tuple[str, dict]]:
+    """Every specification for one league. Returns (label, estimates) pairs."""
+    print(f"\nRefitting {config.LEAGUES[league]} week by week...")
     settings = backtest.BacktestConfig(
-        league=args.league, start=start, end=end, step_days=args.step_days,
+        league=league, start=start, end=end, step_days=args.step_days,
         markets=("1x2",), fit_count_models=False,
     )
     result = backtest.run_backtest(con, settings, verbose=False)
     totals = result.match_totals
     if totals.empty:
-        print("Nothing was scored in this window.")
-        return 1
+        print("  Nothing was scored in this window.")
+        return []
 
     stored = injuries.load_injuries(con)
-    stored = stored[stored["league"] == args.league] if not stored.empty else stored
+    stored = stored[stored["league"] == league] if not stored.empty else stored
     matches = con.execute(
         "SELECT match_id, date, home_team, away_team FROM matches WHERE league = ?",
-        [args.league],
+        [league],
     ).df()
-    con.close()
 
     if stored.empty:
-        print(f"No injuries stored for {args.league}. Run "
+        print(f"  No injuries stored for {league}. Run "
               f"scripts/build_injuries.py --season <year>.")
-        return 1
+        return []
 
     seasons = sorted(stored["season_start_year"].unique())
     print(f"\n{'=' * 78}")
-    print(f"  {config.LEAGUES[args.league]}  |  {start} to {end}")
+    print(f"  {config.LEAGUES[league]}  |  {start} to {end}")
     print(f"  {len(stored)} injury rows, seasons {seasons}")
     print(f"{'=' * 78}")
 
     specs = [
-        ("newly out (the honest one)", new_out_counts, False),
+        ("newly out", new_out_counts, False),
         ("newly out or doubtful", new_out_counts, True),
         ("all currently out", out_counts, False),
         ("all currently out or doubtful", out_counts, True),
     ]
+    out: list[tuple[str, dict]] = []
     for label, builder, doubtful in specs:
         counts = builder(stored, doubtful=doubtful)
         frame, rate = attach(totals, matches, counts)
@@ -334,12 +408,10 @@ def main() -> int:
                   "fetched do not cover this window. Not reporting a result "
                   "from half the data.")
             continue
-        report(frame, label, args.bootstrap, args.seed)
-
-    print("\n  Reminder: this measures whether absences move scoring. It does "
-          "not\n  establish the information was knowable before the price - see "
-          "the\n  docstring.")
-    return 0
+        values = report(frame, label, args.bootstrap, args.seed)
+        if values is not None:
+            out.append((label, values))
+    return out
 
 
 if __name__ == "__main__":
