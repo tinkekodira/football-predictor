@@ -197,19 +197,29 @@ def render_forecast(db_path, prof, league, as_of, half_life, ridge,
     )
 
     def show(market: str, missing: str | None = None) -> None:
-        """One market's prices, never without the evidence for that market.
+        """One market's prices, under its own title and above its own evidence.
 
-        The rule the README applies to sample sizes, applied to markets: a
-        number and the basis for trusting it belong on the same screen. So the
-        label is rendered *before* the table rather than in an expander below
-        it, and a market nobody has scored says so instead of showing nothing.
+        Three things in a fixed order, and the order is the argument. **What
+        this is** (the title), **how much to trust it** (the evidence line),
+        then the numbers. The rule the README applies to sample sizes, applied
+        to markets: a number and the basis for trusting it belong on the same
+        screen, and a market nobody has scored says so instead of showing
+        nothing.
+
+        The title names the clubs rather than saying "home" and "away". Before
+        it existed, the two team-total tables in this tab were identical in
+        shape and carried identical evidence text, so nothing on the page said
+        whose goals a reader was looking at.
         """
         selections = forecast.market(market)
+        title = markets.market_title(market, prof.home_team, prof.away_team)
         if not selections:
             if missing:
+                st.markdown(f"#### {title}")
                 st.info(missing)
             return
         row = stored_evidence[stored_evidence["market"] == market]
+        st.markdown(f"#### {title}")
         st.caption(evidence_mod.labels(row, [market])[market])
         st.dataframe(selection_table(selections), width="stretch", hide_index=True)
 
@@ -264,6 +274,7 @@ def render_forecast(db_path, prof, league, as_of, half_life, ridge,
     with market_tabs[6]:
         show("correct_score")
     with market_tabs[7]:
+        st.markdown("#### Fitted team ratings")
         ratings = bundle.goals.ratings()
         st.dataframe(
             ratings.style.format(
@@ -278,7 +289,12 @@ def render_forecast(db_path, prof, league, as_of, half_life, ridge,
             "league average, hard for teams with few matches."
         )
         if bundle.cards and bundle.cards.referee_effects:
-            st.subheader("Referee card multipliers")
+            st.markdown("#### Referee card multipliers")
+            st.caption(
+                "How many cards each referee shows relative to the league "
+                "average, heavily shrunk because even a busy referee handles "
+                "about thirty matches a season."
+            )
             st.dataframe(bundle.cards.referee_table(), width="stretch", hide_index=True)
 
     with st.expander("Model detail"):
@@ -341,7 +357,11 @@ def render_quality(db_path, league, as_of, half_life, ridge) -> None:
     ]
     scores = [s for s in scores if s.get("n", 0) >= 30]
     if scores:
-        st.subheader("Probability quality")
+        st.markdown("#### Model versus market, per bettable market")
+        st.caption(
+            "Log loss: lower is better. `log_loss_gap` is the model minus the "
+            "closing line, so a negative number is the model scoring better."
+        )
         frame = pd.DataFrame(scores)
         columns = [c for c in (
             "market", "n", "model_log_loss", "base_rate_log_loss",
@@ -363,7 +383,7 @@ def render_quality(db_path, league, as_of, half_life, ridge) -> None:
                     "information rather than failure."
                 )
 
-    st.subheader("Calibration")
+    st.markdown("#### Calibration: when it says 30%, does it happen 30%?")
     market_choice = st.selectbox(
         "Market", sorted(predictions["market"].unique()), key="calibration_market"
     )
@@ -376,6 +396,7 @@ def render_quality(db_path, league, as_of, half_life, ridge) -> None:
             (subset["win_fraction"] > 0.5).astype(float).to_numpy(),
         )
         if not table.empty:
+            st.markdown(f"##### {market_choice}: predicted against observed")
             st.dataframe(table.round(4), width="stretch", hide_index=True)
             chart = table.set_index("band")[["predicted", "observed"]]
             st.bar_chart(chart)
@@ -387,7 +408,7 @@ def render_quality(db_path, league, as_of, half_life, ridge) -> None:
     else:
         st.info("Not enough settled selections in this market to show calibration.")
 
-    st.subheader("Closing line value")
+    st.markdown("#### Closing line value: did the price taken beat the close?")
     bets = predictions[
         predictions["expected_value"].notna()
         & (predictions["expected_value"] >= edge)
@@ -696,19 +717,22 @@ with history_tab:
 
 for tab, (group, metrics) in zip(tabs, MARKET_GROUPS.items()):
     with tab:
+        st.markdown(
+            f"#### {group}: {prof.home_team} and {prof.away_team} compared"
+        )
+        st.caption(
+            "What actually happened, not what the model expects. n is the "
+            "number of matches behind each figure; anything under about ten is "
+            "thin enough that the league average is often the better guess."
+        )
         st.dataframe(
             comparison_table(prof, scope, metrics),
             width="stretch", hide_index=True,
         )
-        st.caption(
-            "n is the number of matches behind each figure. Anything under "
-            "about ten is thin enough that the league average is often the "
-            "better guess."
-        )
 
 with tabs[-2]:
     for block in (prof.home, prof.away):
-        st.subheader(block.team)
+        st.markdown(f"#### {block.team}: recent matches")
         table = form_table(block)
         if table.empty:
             st.write("No matches on record before the cut-off date.")
@@ -731,7 +755,9 @@ with tabs[-1]:
                 {"": "Average total corners", "Value": h2h["avg_total_corners"].format()},
             ]
         )
+        st.markdown("#### Across every previous meeting")
         st.dataframe(summary, width="stretch", hide_index=True)
+        st.markdown("#### The meetings themselves")
         st.dataframe(
             pd.DataFrame(h2h["matches"])[
                 ["date", "league_name", "home_team", "away_team",

@@ -83,6 +83,7 @@ def _render_withheld(withheld) -> None:
             "value of +17.5% against +12.8% elsewhere, and did not go on to do "
             "better."
         )
+        st.markdown("##### Withheld selections, and the reason for each")
         table = withheld[
             ["league", "fixture", "market", "selection", "price",
              "model_probability", "expected_value", "withheld_reason"]
@@ -198,6 +199,12 @@ def render(db_path: str, half_life: float, ridge: float | None) -> None:
             "model_probability": "model", "expected_value": "EV",
             "thin_history": "model barely knows",
         }
+    )
+    st.markdown(f"#### Ranked selections, {min_edge:+.0%} expected value and above")
+    st.caption(
+        "Sorted by expected value. `model` is the model's probability, `EV` the "
+        "expected profit per unit staked at the price shown, and `evidence` the "
+        "track record of that market on that league."
     )
     st.dataframe(
         table.style.format({"price": "{:.2f}", "model": "{:.1%}", "EV": "{:+.1%}"}),

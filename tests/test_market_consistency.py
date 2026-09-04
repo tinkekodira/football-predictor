@@ -315,3 +315,62 @@ def test_team_count_totals_read_the_team_distributions_not_the_match_total():
         s for s in team if s.market == "home_total_corners" and s.selection == "over"
     )
     assert over_home.probability == pytest.approx(home[2:].sum(), abs=1e-12)
+
+
+# --------------------------------------------------------------------------
+# Every market has to be nameable
+# --------------------------------------------------------------------------
+
+def test_every_priced_market_has_a_title(matrix):
+    """A table of probabilities is unreadable without one.
+
+    Pinned because the failure is silent: a market added without a title still
+    renders, as a nameless block of numbers, and the person who added it knows
+    what it is.
+    """
+    priced = {s.market for s in markets.all_goal_selections(matrix)}
+    priced |= {
+        "total_corners", "home_total_corners", "away_total_corners",
+        "corner_handicap", "total_cards", "home_total_cards",
+        "away_total_cards", "card_handicap", "1x2_ht", "total_goals_ht",
+    }
+    missing = sorted(priced - set(markets.MARKET_TITLES))
+    assert not missing, f"markets with no title: {missing}"
+
+
+def test_team_market_titles_name_the_clubs():
+    """"Home team goals" still asks the reader to remember which side is which.
+
+    This is the bug that prompted the titles: two team-total tables, identical
+    in shape, carrying identical evidence text, with nothing on the page saying
+    whose goals they were.
+    """
+    assert markets.market_title("home_goals", "Arsenal", "Liverpool") == "Arsenal goals"
+    assert markets.market_title("away_goals", "Arsenal", "Liverpool") == "Liverpool goals"
+    assert markets.market_title(
+        "home_total_corners", "Arsenal", "Liverpool"
+    ) == "Arsenal corners"
+
+
+def test_the_two_sides_of_a_team_market_never_share_a_title():
+    for home_market, away_market in (
+        ("home_goals", "away_goals"),
+        ("home_total_corners", "away_total_corners"),
+        ("home_total_cards", "away_total_cards"),
+    ):
+        pair = {
+            markets.market_title(home_market, "Arsenal", "Liverpool"),
+            markets.market_title(away_market, "Arsenal", "Liverpool"),
+        }
+        assert len(pair) == 2, f"{home_market} and {away_market} render alike"
+
+
+def test_titles_fall_back_to_something_visible_rather_than_nothing():
+    """A market added without a title is labelled badly, not invisibly."""
+    assert markets.market_title("some_new_market") == "Some new market"
+
+
+def test_a_title_works_without_team_names():
+    """The CLI and the app both have them; a future caller might not."""
+    assert markets.market_title("home_goals") == "Home team goals"
+    assert markets.market_title("away_goals") == "Away team goals"

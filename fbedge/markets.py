@@ -28,6 +28,57 @@ DEFAULT_CARD_LINES = (2.5, 3.5, 4.5, 5.5)
 DEFAULT_TEAM_GOAL_LINES = (0.5, 1.5, 2.5)
 
 
+# What each market is called on a page, in one place.
+#
+# **A table of probabilities is unreadable without one.** Two team-total tables
+# sitting one above the other are identical in shape and, with only the market
+# code to tell them apart, identical to look at - a reader cannot see whose
+# goals they are. That was the state of the app until 2026-09-04.
+#
+# `{home}` and `{away}` are filled with the actual club names rather than the
+# words "home" and "away", because "Arsenal goals" is unambiguous where "Home
+# team goals" still asks the reader to remember which side is which.
+MARKET_TITLES: dict[str, str] = {
+    "1x2": "Match result",
+    "double_chance": "Double chance",
+    "draw_no_bet": "Draw no bet",
+    "winning_margin": "Winning margin",
+    "total_goals": "Total goals",
+    "btts": "Both teams to score",
+    "home_goals": "{home} goals",
+    "away_goals": "{away} goals",
+    "asian_handicap": "Asian handicap",
+    "correct_score": "Most likely scorelines",
+    "1x2_ht": "Half-time result",
+    "total_goals_ht": "Half-time total goals",
+    "total_corners": "Total corners",
+    "home_total_corners": "{home} corners",
+    "away_total_corners": "{away} corners",
+    "corner_handicap": "Corner handicap",
+    "total_cards": "Total cards",
+    "home_total_cards": "{home} cards",
+    "away_total_cards": "{away} cards",
+    "card_handicap": "Card handicap",
+}
+
+
+def market_title(
+    market: str, home_team: str | None = None, away_team: str | None = None
+) -> str:
+    """A readable name for a market, with the clubs named where it helps.
+
+    Falls back to the market code with underscores replaced, so a market added
+    without a title here is still labelled - badly, but visibly, which is the
+    right failure. A silently untitled table is the thing this exists to stop.
+    """
+    template = MARKET_TITLES.get(market)
+    if template is None:
+        return market.replace("_", " ").capitalize()
+    return template.format(
+        home=home_team or "Home team", away=away_team or "Away team"
+    )
+
+
 @dataclass(frozen=True)
 class Selection:
     """One bettable outcome with its model probability.

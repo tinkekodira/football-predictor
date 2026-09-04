@@ -201,3 +201,37 @@ def test_the_half_time_switch_runs_a_second_fit():
     assert switch, "the half-time switch is missing from the sidebar"
     switch[0].set_value(True).run()
     assert not at.exception
+
+
+def test_every_table_on_the_forecast_page_has_a_heading():
+    """A probability table with no title does not say what it is the odds of.
+
+    Two team-total tables used to sit one above the other, identical in shape
+    and carrying identical evidence text, with nothing naming the side. This
+    counts headings against tables so that cannot come back.
+    """
+    at = _match_app()
+    at.run()
+    assert not at.exception
+
+    headings = [
+        str(m.value) for m in at.markdown if str(m.value).lstrip().startswith("#")
+    ]
+    assert len(headings) >= len(at.dataframe), (
+        f"{len(at.dataframe)} tables but only {len(headings)} headings"
+    )
+
+
+def test_the_team_total_tables_name_their_club():
+    at = _match_app()
+    at.run()
+    assert not at.exception
+
+    headings = [str(m.value) for m in at.markdown]
+    joined = "\n".join(headings)
+    # Whichever fixture the calendar lands on, both clubs must appear as the
+    # subject of a table rather than as "home" and "away".
+    assert "goals" in joined
+    assert not any("Home team goals" in h for h in headings), (
+        "the title should name the club, not the venue"
+    )

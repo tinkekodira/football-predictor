@@ -123,27 +123,23 @@ class FixturePrediction:
         # were computed and thrown away before Phase 4: `double_chance` and the
         # team totals were built by `predict_fixture` and never rendered, so a
         # reader had no way to see them without writing code.
+        #
+        # The order is a reading order and lives here; the *names* come from
+        # `markets.MARKET_TITLES`, so the terminal and the app cannot end up
+        # calling the same market two different things.
+        order = [
+            "1x2", "double_chance", "draw_no_bet", "winning_margin",
+            "total_goals", "home_goals", "away_goals", "btts",
+            "1x2_ht", "total_goals_ht",
+            "total_corners", "home_total_corners", "away_total_corners",
+            "corner_handicap",
+            "total_cards", "home_total_cards", "away_total_cards",
+            "card_handicap",
+            "asian_handicap", "correct_score",
+        ]
         groups = [
-            ("Match result", "1x2"),
-            ("Double chance", "double_chance"),
-            ("Draw no bet", "draw_no_bet"),
-            ("Winning margin", "winning_margin"),
-            ("Total goals", "total_goals"),
-            ("Home team goals", "home_goals"),
-            ("Away team goals", "away_goals"),
-            ("Both teams to score", "btts"),
-            ("Half-time result", "1x2_ht"),
-            ("Half-time goals", "total_goals_ht"),
-            ("Total corners", "total_corners"),
-            ("Home team corners", "home_total_corners"),
-            ("Away team corners", "away_total_corners"),
-            ("Corner handicap", "corner_handicap"),
-            ("Total cards", "total_cards"),
-            ("Home team cards", "home_total_cards"),
-            ("Away team cards", "away_total_cards"),
-            ("Card handicap", "card_handicap"),
-            ("Asian handicap", "asian_handicap"),
-            ("Most likely scores", "correct_score"),
+            (markets.market_title(m, self.home_team, self.away_team), m)
+            for m in order
         ]
         for title, market in groups:
             selections = self.market(market)
