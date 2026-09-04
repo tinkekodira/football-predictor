@@ -193,6 +193,53 @@ def test_the_pre_match_scan_tab_renders():
     assert "Live EV scanner" not in labels
 
 
+def test_the_paper_ledger_tab_renders():
+    """Shallow like the rest of this file: it runs, and it is named honestly."""
+    at = _match_app()
+    at.run()
+    assert not at.exception
+    assert "Paper ledger" in [tab.label for tab in at.get("tab")]
+
+
+def test_the_ledger_tab_never_writes_to_the_database():
+    """The app's connection is read-only, and the ledger is append-only.
+
+    Both halves matter. DuckDB refuses even `CREATE TABLE IF NOT EXISTS` on a
+    read-only connection, so a reader that tried to create its tables would
+    take the whole page down on any database without a ledger yet - which is
+    every database until somebody runs the scan with `--record`. And a page
+    that *could* write would be mutating a forward record on every load, which
+    is the one thing this table must never permit.
+
+    Checked against the real read path rather than the rendered page, because
+    the failure is in `ledger.load_bets` and a smoke test of the tab would only
+    say that something went wrong.
+    """
+    from fbedge import ledger
+
+    con = database.connect(config.DB_PATH, read_only=True)
+    try:
+        assert ledger.summary(con)["bets"] >= 0
+        ledger.load_bets(con)
+        ledger.withheld_comparison(con)
+    finally:
+        con.close()
+
+
+def test_the_ledger_reads_a_database_that_has_never_recorded_a_claim(tmp_path):
+    """The empty case is the common one, and it must not raise."""
+    from fbedge import ledger
+
+    path = tmp_path / "no_ledger.duckdb"
+    database.connect(path).close()
+    con = database.connect(path, read_only=True)
+    try:
+        assert ledger.load_bets(con).empty
+        assert ledger.summary(con)["bets"] == 0
+    finally:
+        con.close()
+
+
 def test_the_half_time_switch_runs_a_second_fit():
     """Half-time markets must appear only when asked for, and never be derived."""
     at = _match_app()

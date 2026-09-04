@@ -35,6 +35,8 @@ from fbedge.models import base as model_base
 
 import scan_view
 
+import ledger_view
+
 import home_view
 
 st.set_page_config(page_title="football-edge", page_icon="*", layout="wide")
@@ -708,8 +710,9 @@ with middle:
 
 st.divider()
 
-forecast_tab, history_tab, quality_tab, scan_tab = st.tabs(
-    ["Model forecast", "What happened", "Model quality", "Pre-match EV scan"]
+forecast_tab, history_tab, quality_tab, scan_tab, ledger_tab = st.tabs(
+    ["Model forecast", "What happened", "Model quality", "Pre-match EV scan",
+     "Paper ledger"]
 )
 
 with history_tab:
@@ -785,6 +788,12 @@ with quality_tab:
 
 with scan_tab:
     scan_view.render(db_path, half_life, ridge)
+
+with ledger_tab:
+    # Read-only on purpose. Recording and settling are writes to an
+    # append-only record, and a page that mutated it on every load would
+    # corrupt the one measurement this project cannot reconstruct.
+    ledger_view.render(db_path)
 
 st.divider()
 st.caption(

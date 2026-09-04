@@ -525,9 +525,13 @@ def load_bets(
     `False` only those still open. The outcome columns are NULL on an open bet
     rather than absent, so one frame shape serves every caller.
     """
-    if not _has_table(con, BETS_TABLE):
+    # **Never creates a table.** The app reads this through a read-only
+    # connection, and DuckDB refuses even `CREATE TABLE IF NOT EXISTS` on one -
+    # so a reader that tried to be helpful here would take the whole page down
+    # on a database that simply has no ledger yet. Both tables are made
+    # together by `create_tables`, so either one missing means neither exists.
+    if not _has_table(con, BETS_TABLE) or not _has_table(con, SETTLEMENTS_TABLE):
         return pd.DataFrame(columns=BET_COLUMNS + SETTLEMENT_COLUMNS[1:])
-    create_tables(con)
 
     outcome_columns = ", ".join(f"s.{c}" for c in SETTLEMENT_COLUMNS[1:])
     where, params = [], []

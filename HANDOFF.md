@@ -65,7 +65,7 @@ weeks, judge on the CLV from *that* period - is unchanged.
 
 ## Current status
 
-- 593 tests passing, 1 skipped (`python -m pytest`).
+- 596 tests passing, 1 skipped (`python -m pytest`).
 - **A paper-trading ledger exists, and it is the first thing here that
   accumulates evidence going forward rather than backward.** The standing rule
   has always been "paper-trade for several weeks and judge it on the CLV from
@@ -577,7 +577,10 @@ out. Built on the `paper-trading-ledger` branch.
   `record`, `load_bets`, `settle_open`, `summary`, `withheld_comparison`.
 - `scripts/scan_fixtures.py` - a `--record` flag, and canonical column names.
 - `scripts/paper_trade.py` - settle the open bets and print the running record.
-- `tests/test_ledger.py` - 24 tests. **593 in total**, from 569.
+- `ledger_view.py` - the tab, at the repo root like the other two views so
+  nothing importable by a model or a test pulls in Streamlit.
+- `tests/test_ledger.py` - 24 tests, plus 3 in `tests/test_app.py`.
+  **596 in total**, from 569.
 
 ### Why this and not a model change
 
@@ -657,8 +660,26 @@ eventually confirm the backtest: CLV around -1.5%, measured forward instead of
 backward. **A ledger that agreed with the backtest would be a success for the
 ledger**, and the second independent confirmation that this model has no edge.
 
-Not built, and the obvious next step: a Streamlit tab. The command line is the
-whole interface today.
+### The tab, and the read-only bug it exposed
+
+`ledger_view.py` is a **viewer and nothing else**: it records no claims and
+settles nothing. Three sub-tabs - open, settled, withheld - behind a headline
+that puts closing line value above profit, with the clustered standard error
+beside it and a refusal to characterise a mean under thirty bets.
+
+Building it found a real defect in the module it displays. `load_bets` called
+`create_tables`, and **DuckDB refuses even `CREATE TABLE IF NOT EXISTS` on a
+read-only connection** - which is the connection the app uses. So the tab would
+have crashed the page on every database that had never recorded a claim, which
+is every database until somebody runs the scan with `--record`. The read path
+now creates nothing and returns an empty frame when the tables are absent.
+`test_the_ledger_tab_never_writes_to_the_database` pins it against the real
+read path rather than the rendered page, because a smoke test of the tab would
+only report that something went wrong.
+
+The tab is deliberately incapable of writing. Recording and settling are writes
+to an append-only forward record, and a page that mutated one on every load
+would corrupt the single measurement this project cannot reconstruct.
 
 ## What was added in the home-page session
 

@@ -533,6 +533,12 @@ python scripts/scan_fixtures.py --record     # file today's board
 python scripts/paper_trade.py                # settle it, and read the record
 ```
 
+The app carries the same record as a **Paper ledger** tab — open bets, settled
+claims and withheld picks, each in its own view. That page only ever reads:
+recording and settling are writes to an append-only record, and a page that
+mutated one every time it loaded would corrupt the one measurement here that
+cannot be rebuilt from static inputs.
+
 Every claim is stored with the model settings that produced it — resolved, not
 requested — because a "+6% EV" recorded six weeks ago is worthless if the
 defaults moved underneath it. The claim is immutable and its outcome lives in a
