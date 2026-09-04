@@ -22,13 +22,30 @@ git clone <your-repo> football-edge && cd football-edge
 python -m venv .venv && source .venv/bin/activate    # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
-python scripts/build_database.py --seasons 10        # ~5 min, ~50 CSV downloads
-python scripts/build_xg.py                           # optional: expected goals
+python scripts/build_database.py --seasons 10        # ~2 min, from the CSVs in the repo
+python scripts/build_xg.py                           # expected goals (the model default)
+python scripts/build_fixtures.py                     # the season calendar the home page needs
 streamlit run app.py
 ```
 
-The browser opens on the fixture profile page. Pick a league, two teams, and a
-knowledge cut-off date.
+**The database is not in the repository** - it is a 22MB binary that changes
+most sessions, and it is rebuilt by the commands above. The season CSVs it is
+built from *are* committed, so the first step needs no network. See
+`.gitignore` for what else is left out and why.
+
+The browser opens on the calendar. Pick a date, then a fixture for the detail
+page.
+
+Two optional extras, both needing a free API-Football key in
+`FOOTBALL_API_KEY`:
+
+```bash
+python scripts/build_crests.py                       # club badges
+python scripts/build_injuries.py --season 2024       # injuries (free plan stops at 2024)
+```
+
+Without them the app still works: clubs fall back to a generated monogram and
+the injury panel says what is missing.
 
 **No internet, or want to see it working before downloading anything?** The
 project ships a generator that produces synthetic CSVs in the source's exact
