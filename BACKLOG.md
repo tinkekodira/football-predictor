@@ -366,6 +366,34 @@ line-up proxy to be implemented as the honest alternative — which is what that
 script already is. Neither was done, because both were already false. Both
 docstrings now open by saying which of the two they are.
 
+## B15. A schema change can look like a price move in the snapshot archive
+
+**Severity: low now, and permanent if it is not noticed at the time.**
+
+The archive hashes each fixture's identity plus every price attached to it, so
+any change to *what is extracted* produces a new content hash and a new
+snapshot - which reads, later, as the market having moved.
+
+It happened immediately. The first pull on 2026-09-04 ran before the B11 fix
+and carried eight NULL-line Asian handicap rows per fixture. The pull 25
+minutes later did not. All 47 fixtures therefore appeared to change price, and
+none had: the 1X2, totals and handicap prices were byte-identical.
+
+**Cleaned, and this is the one deletion the archive will ever accept.** Before
+deleting, every non-NULL-line price in the superseded snapshots was checked to
+exist in the later one - zero real observations would be lost - and then the
+pre-fix pull was removed. The archive is append-only *for price observations*;
+a row that records a parser version rather than a market is not one.
+
+**What to do next time.** If the odds extraction changes again, either accept a
+one-off spurious change and note the date here, or clean it the same way within
+the same session. Do not clean it later: after real price movement has
+accumulated, "identical apart from the schema" stops being checkable.
+
+The alternative - versioning the hash so a parser change is visible as a
+parser change - is the proper fix and is not worth it for a solo archive that
+has changed schema once.
+
 ---
 
 ## Not bugs — open questions, kept here so they stay visible
