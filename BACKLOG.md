@@ -1,7 +1,9 @@
 # Known bugs and deferred work
 
 Things found and deliberately not fixed, kept so they are not re-discovered
-from scratch. Each entry says what is wrong, how it was confirmed, and what
+from scratch. Entries marked FIXED are kept rather than deleted: the reasoning
+is the useful part, and a fixed bug that leaves no trace is one somebody
+reintroduces. Each entry says what is wrong, how it was confirmed, and what
 fixing it would involve. Ordered by how much damage it can do if forgotten.
 
 Nothing here blocks the current model. Every one of them was found while doing
@@ -9,9 +11,9 @@ something else, and shelved on purpose.
 
 ---
 
-## B1. `fair_line_preference` cannot actually pin the benchmark
+## B1. `fair_line_preference` cannot actually pin the benchmark — FIXED
 
-**Severity: high — it makes a tool lie to you.**
+**Severity: high — it made a tool lie to you.**
 
 `_fill_market` (`fbedge/backtest.py:257`) builds its bookmaker order from the
 preference list and then appends everything else:
@@ -33,15 +35,30 @@ script detects a real problem and then hands out a fix that does nothing. The
 Pinnacle-pinned numbers in `HANDOFF.md` were produced by computing fair lines
 directly from the odds table instead, working around this.
 
-**Fix:** a `fair_line_fallback: bool = True` field on `BacktestConfig`, threaded
-to `_fill_market`, that drops the `ordered +=` line when false. Report the
-coverage lost, because pinning will drop matches and a silently smaller sample
-is the next version of this same bug. Then make `season_breakdown.py` print an
-instruction that works.
+**FIXED 2026-09-04.** `BacktestConfig.fair_line_fallback` (default `True`, so
+nothing silently narrows) is threaded to `_fill_market`, and
+`season_breakdown.py --pin-benchmark pinnacle` sets both halves - naming the
+preference alone was never enough. Four tests in `tests/test_benchmark.py` pin
+the distinction, including one that reproduces the old behaviour so it cannot
+come back quietly.
 
-## B2. `build_xg.py` holds a write lock across the whole network fetch
+**It mattered.** E0 from 2023, 1X2, same window and code:
 
-**Severity: medium — locks the database for the length of a download.**
+| season | unpinned (benchmark switches) | pinned to Pinnacle | bets |
+|---|---|---|---|
+| 2023 | -1.54% (pinnacle) | -1.54% | 480 / 480 |
+| 2024 | -1.71% (betfair) | -1.50% | 487 / 487 |
+| 2025 | -1.90% (betfair) | **-1.36%** | 494 / **253** |
+
+The apparent deterioration across those three seasons is mostly the instrument
+again. Note the cost, which the fix reports rather than hides: pinning drops
+half of 2025, because Pinnacle did not price those matches, so the two columns
+are not the same measurement. That is the honest trade - you cannot compare
+across seasons without pinning, and pinning costs coverage.
+
+## B2. `build_xg.py` holds a write lock across the whole network fetch — FIXED
+
+**Severity: medium — locked the database for the length of a download.**
 
 `scripts/build_xg.py:70` opens `database.connect(..., read_only=False)` before
 calling `collect()`, which does the Understat requests. DuckDB allows one
@@ -52,9 +69,18 @@ This is the same defect that was found and fixed in `scripts/build_rosters.py`
 during the availability session, where it locked the database for ~50 minutes.
 `build_xg.py` was never given the same treatment.
 
-**Fix:** read the fixture list on a read-only connection, close it, do the
-fetching, then open a write connection only for the final `CREATE`/`INSERT`.
-Mirror `build_rosters.py`, which already has the correct shape.
+**FIXED 2026-09-04.** The fixture list is read on a read-only connection which
+is closed before any download; the write connection is opened at the end, for
+the insert alone. Mirrors `build_rosters.py`.
+
+**Running it to check the fix exposed a worse bug in the same file, also
+fixed.** The write did `DROP TABLE match_xg` and then inserted only the leagues
+that run had processed, so `python scripts/build_xg.py --league E0` **silently
+deleted the xG for the other four leagues** - which is exactly what happened
+while testing. It now creates the table if absent and deletes only the rows
+belonging to leagues the run actually covered, the same scoped-delete shape as
+`fixtures.write_calendar` and `injuries.write_injuries`. Verified: a single-
+league run leaves the other four intact.
 
 ## B3. No `.gitignore`, and build artifacts are tracked
 

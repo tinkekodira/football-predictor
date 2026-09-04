@@ -94,6 +94,13 @@ class BacktestConfig:
     # Configurable so a run can be pinned to one book that covers the whole
     # window, which is the only way to compare CLV across seasons honestly.
     fair_line_preference: tuple[str, ...] = FAIR_LINE_PREFERENCE
+    # Whether a book outside `fair_line_preference` may still supply a
+    # benchmark. True keeps the old behaviour and maximises coverage. False
+    # is what pinning actually requires: without it, naming one book only
+    # expressed a preference and quietly fell back to any other, so a run
+    # meant to hold the benchmark fixed did not. `season_breakdown.py`
+    # printed that non-working remedy for months.
+    fair_line_fallback: bool = True
     # "shin" since it is the only one of the three measured to reproduce the
     # exchange's probabilities without a favourite-longshot gradient. This
     # default changed after multiplicative was found to inflate CLV by 1.75
@@ -197,7 +204,10 @@ def _pick_price(group: pd.DataFrame, phase: str, preference: tuple[str, ...]):
 
 
 def _market_probabilities(
-    group: pd.DataFrame, method: str, preference: tuple[str, ...] = FAIR_LINE_PREFERENCE
+    group: pd.DataFrame,
+    method: str,
+    preference: tuple[str, ...] = FAIR_LINE_PREFERENCE,
+    fallback: bool = True,
 ) -> dict[tuple, tuple[float, str]]:
     """Margin-free closing probabilities and the book each came from.
 
@@ -230,7 +240,7 @@ def _market_probabilities(
             phase_rows = rows[rows["phase"] == phase]
             if phase_rows.empty:
                 continue
-            if _fill_market(out, market, phase_rows, method, preference):
+            if _fill_market(out, market, phase_rows, method, preference, fallback):
                 break
     return out
 
@@ -238,6 +248,7 @@ def _market_probabilities(
 def _fill_market(
     out: dict, market, rows: pd.DataFrame, method: str,
     preference: tuple[str, ...] = FAIR_LINE_PREFERENCE,
+    fallback: bool = True,
 ) -> bool:
     """Add one complete market's fair probabilities. True if any were added.
 
@@ -246,15 +257,23 @@ def _fill_market(
     removes the pushed portion. That matters for handicaps and whole-number
     totals, and it is the scale the model must be converted to before the two
     are compared.
+
+    `fallback` decides whether a book outside `preference` may answer. With it
+    on - the default, and the historical behaviour - a market is priced
+    whenever anyone priced it, at the cost of letting a soft book supply the
+    benchmark. With it off, `preference` means what it says, which is the only
+    way to hold one benchmark fixed across seasons. Turning it off drops
+    matches, so the caller is told how many.
     """
     expected = 3 if market == "1x2" else 2
     available = set(rows["bookmaker"])
     ordered = [b for b in preference if b in available]
-    # Anything not named in the preference is still tried, in name order, so a
-    # market is priced whenever it can be. That maximises coverage at the cost
-    # of letting a soft book supply the benchmark, which is why the choice is
-    # recorded rather than left implicit.
-    ordered += sorted(available - set(ordered))
+    if fallback:
+        # Anything not named in the preference is still tried, in name order,
+        # so a market is priced whenever it can be. The choice is recorded
+        # rather than left implicit, because which book answered is part of
+        # the measurement.
+        ordered += sorted(available - set(ordered))
     for bookmaker in ordered:
         book_rows = rows[rows["bookmaker"] == bookmaker]
         deduped = book_rows.drop_duplicates("selection")
@@ -400,7 +419,8 @@ def _score_match(row, bundle, match_odds: pd.DataFrame | None, config):
         return [], total_record
 
     market_probabilities = _market_probabilities(
-        match_odds, config.margin_method, config.fair_line_preference
+        match_odds, config.margin_method, config.fair_line_preference,
+        config.fair_line_fallback,
     )
     records: list[dict] = []
 

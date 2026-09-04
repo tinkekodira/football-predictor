@@ -78,6 +78,14 @@ def main() -> int:
     parser.add_argument("--step-days", type=int, default=7)
     parser.add_argument("--edge-threshold", type=float, default=0.02)
     parser.add_argument("--csv", type=Path, default=None)
+    parser.add_argument(
+        "--pin-benchmark", default=None,
+        help="hold the margin-free closing line to one bookmaker for the "
+             "whole window, dropping matches it did not price. This is "
+             "the only way to compare CLV across seasons: the default "
+             "preference switches book in 2024-25 and rewrites every "
+             "number either side of it.",
+    )
     parser.add_argument("--db", type=Path, default=config.DB_PATH)
     args = parser.parse_args()
 
@@ -90,10 +98,22 @@ def main() -> int:
     end = dt.date.fromisoformat(args.end) if args.end else dt.date.today()
     markets = (args.market,) if args.market else backtest.BETTABLE_MARKETS
 
+    pinned = {}
+    if args.pin_benchmark:
+        # Both halves are needed. Naming the preference alone only reorders the
+        # candidates; the fallback is what lets any other book answer, and
+        # leaving it on is why the old advice in this script did nothing.
+        pinned = {
+            "fair_line_preference": (args.pin_benchmark,),
+            "fair_line_fallback": False,
+        }
+        print(f"Benchmark pinned to {args.pin_benchmark}: matches it did not "
+              "price are dropped rather than scored against another book.\n")
+
     settings = backtest.BacktestConfig(
         league=args.league, start=start, end=end, step_days=args.step_days,
         markets=markets, edge_threshold=args.edge_threshold,
-        fit_count_models=False,
+        fit_count_models=False, **pinned,
     )
     result = backtest.run_backtest(con, settings, verbose=True)
     if result.predictions.empty:
@@ -127,7 +147,10 @@ def main() -> int:
         print("  Closing line value is measured against this benchmark, so the")
         print("  seasons either side of a change are not on one scale. Re-run")
         print("  pinned to a single book before reading the table below:")
-        print("    BacktestConfig(fair_line_preference=('pinnacle',), ...)")
+        print("    python scripts/season_breakdown.py --pin-benchmark pinnacle ...")
+        print("  (that needs fair_line_fallback=False, which --pin-benchmark")
+        print("   sets. Naming a preference alone only expresses a preference:")
+        print("   any other book still answers where the named one is silent.)")
         print("\n  Benchmark by season:")
         print(sources.to_string(index=False, float_format=lambda v: f"{v:.3f}"))
 
