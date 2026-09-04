@@ -40,6 +40,11 @@ class ModelBundle:
     goals: goals.GoalsModel
     corners: counts.CountModel | None = None
     cards: counts.CountModel | None = None
+    # A second, independent Dixon-Coles fit on half-time scores. Optional
+    # because most callers do not want the extra fit, and None rather than a
+    # derived approximation because half-time markets cannot honestly be read
+    # off the full-time matrix. See `models.base.TrainingSet.half_time`.
+    half_time: goals.GoalsModel | None = None
     notes: list[str] = field(default_factory=list)
 
     def summaries(self) -> list[str]:
@@ -47,6 +52,8 @@ class ModelBundle:
         for model in (self.corners, self.cards):
             if model is not None:
                 out.append(model.summary())
+        if self.half_time is not None:
+            out.append("Half-time " + self.half_time.summary())
         return out
 
 
@@ -64,6 +71,11 @@ class FixturePrediction:
     selections: list[markets.Selection]
     notes: list[str] = field(default_factory=list)
     model_summaries: list[str] = field(default_factory=list)
+    # One short evidence label per market, from `evidence.labels`. Empty when
+    # nobody asked for it, because building it costs a database read - but the
+    # renderer prints whatever is here, so a caller that has the evidence
+    # cannot forget to show it.
+    evidence: dict[str, str] = field(default_factory=dict)
 
     def market(self, name: str) -> list[markets.Selection]:
         return [s for s in self.selections if s.market == name]
@@ -107,12 +119,30 @@ class FixturePrediction:
             )
         lines.append("")
 
+        # Every market the model prices, not a curated subset. Half of these
+        # were computed and thrown away before Phase 4: `double_chance` and the
+        # team totals were built by `predict_fixture` and never rendered, so a
+        # reader had no way to see them without writing code.
         groups = [
             ("Match result", "1x2"),
+            ("Double chance", "double_chance"),
+            ("Draw no bet", "draw_no_bet"),
+            ("Winning margin", "winning_margin"),
             ("Total goals", "total_goals"),
+            ("Odd / even goals", "odd_even_goals"),
+            ("Home team goals", "home_goals"),
+            ("Away team goals", "away_goals"),
             ("Both teams to score", "btts"),
+            ("Half-time result", "1x2_ht"),
+            ("Half-time goals", "total_goals_ht"),
             ("Total corners", "total_corners"),
+            ("Home team corners", "home_total_corners"),
+            ("Away team corners", "away_total_corners"),
+            ("Corner handicap", "corner_handicap"),
             ("Total cards", "total_cards"),
+            ("Home team cards", "home_total_cards"),
+            ("Away team cards", "away_total_cards"),
+            ("Card handicap", "card_handicap"),
             ("Asian handicap", "asian_handicap"),
             ("Most likely scores", "correct_score"),
         ]
@@ -120,7 +150,9 @@ class FixturePrediction:
             selections = self.market(market)
             if not selections:
                 continue
-            lines += [title, "-" * width]
+            evidence = self.evidence.get(market) if self.evidence else None
+            heading = title if evidence is None else f"{title}    [{evidence}]"
+            lines += [heading, "-" * width]
             for s in selections:
                 lines.append(
                     f"  {s.label:<22}{s.probability * 100:>7.1f}%"
@@ -157,6 +189,7 @@ def build_models(
     target: str | None = None,
     blend_weight: float = base.DEFAULT_BLEND_WEIGHT,
     use_availability: bool = False,
+    fit_half_time: bool = False,
 ) -> ModelBundle:
     """Fit goals, corners and cards models for one league.
 
@@ -169,7 +202,7 @@ def build_models(
     """
     key = (
         league, as_of, half_life_days, ridge, fit_counts, target, blend_weight,
-        use_availability, _fingerprint(con, league),
+        use_availability, fit_half_time, _fingerprint(con, league),
     )
     if use_cache and key in _MODEL_CACHE:
         return _MODEL_CACHE[key]
@@ -211,12 +244,26 @@ def build_models(
             except base.InsufficientData as exc:
                 notes.append(str(exc))
 
+    half_time_model = None
+    if fit_half_time:
+        try:
+            # Forced to "goals": Understat publishes no half-time xG, so there
+            # is nothing to blend, and a silent fallback to the full-time blend
+            # is exactly the confusion this whole market is guarded against.
+            half_time_model = goals.fit_goals_model(
+                training.half_time(), ridge=ridge, half_life_days=half_life_days,
+                target="goals",
+            )
+        except base.InsufficientData as exc:
+            notes.append(f"No half-time model: {exc}")
+
     bundle = ModelBundle(
         league=league,
         as_of=as_of,
         goals=goals_model,
         corners=optional["corners"],
         cards=optional["cards"],
+        half_time=half_time_model,
         notes=notes,
     )
     if use_cache:
@@ -256,6 +303,70 @@ def _fixture_availability(con, league, home_team, away_team, as_of):
     )
 
 
+def build_selections(
+    bundle: ModelBundle,
+    home_team: str,
+    away_team: str,
+    referee: str | None = None,
+    max_goals: int = 12,
+    missing_home: float = 0.0,
+    missing_away: float = 0.0,
+) -> tuple[list[markets.Selection], tuple[float, float],
+           tuple[float, float] | None, tuple[float, float] | None]:
+    """Every market a fitted bundle can price for one fixture.
+
+    **The single place selections are assembled.** Before this existed the CLI,
+    the app and the backtest each built their own list, which is three chances
+    for one of them to derive a market differently from the others - and the
+    project's central claim about the model layer is that they cannot. The
+    walk-forward's calibration pass uses this too, so the markets scored in a
+    backtest are exactly the markets a scan prices.
+
+    Returns `(selections, expected_goals, expected_corners, expected_cards)`,
+    with the two count tuples None when that model could not be fitted.
+    """
+    matrix = bundle.goals.score_matrix(
+        home_team, away_team, max_goals=max_goals,
+        missing_home=missing_home, missing_away=missing_away,
+    )
+    expected_goals = bundle.goals.rates(
+        home_team, away_team, missing_home, missing_away
+    )
+    selections = markets.all_goal_selections(
+        matrix, handicap_lines=tuple(_handicap_lines(expected_goals))
+    )
+
+    if bundle.half_time is not None:
+        # Its own matrix from its own fit. Halving the full-time rates would
+        # be wrong in two directions at once: about 45% of goals arrive before
+        # the interval, and the fitted half-time home advantage is larger than
+        # the full-time one.
+        half_matrix = bundle.half_time.score_matrix(
+            home_team, away_team, max_goals=max(6, max_goals // 2)
+        )
+        selections += [
+            markets.Selection("1x2_ht", s.selection, s.probability)
+            for s in markets.match_odds(half_matrix)
+        ]
+        selections += [
+            markets.Selection(
+                "total_goals_ht", s.selection, s.probability,
+                line=s.line, push_probability=s.push_probability,
+            )
+            for s in markets.total_goals(half_matrix, (0.5, 1.5, 2.5))
+        ]
+
+    expected_corners = _add_count_market(
+        selections, bundle.corners, home_team, away_team, referee,
+        market="total_corners", default_lines=markets.DEFAULT_CORNER_LINES,
+    )
+    expected_cards = _add_count_market(
+        selections, bundle.cards, home_team, away_team, referee,
+        market="total_cards", default_lines=markets.DEFAULT_CARD_LINES,
+    )
+    return selections, expected_goals, expected_corners, expected_cards
+
+
 def predict_fixture(
     con,
     home_team: str,
@@ -269,6 +380,7 @@ def predict_fixture(
     target: str | None = None,
     blend_weight: float = base.DEFAULT_BLEND_WEIGHT,
     use_availability: bool = False,
+    half_time: bool = False,
 ) -> FixturePrediction:
     """Price every market for one fixture.
 
@@ -294,7 +406,7 @@ def predict_fixture(
     bundle = build_models(
         con, league, as_of, half_life_days=half_life_days, ridge=ridge,
         target=target, blend_weight=blend_weight,
-        use_availability=use_availability,
+        use_availability=use_availability, fit_half_time=half_time,
     )
     notes = list(bundle.notes)
 
@@ -320,31 +432,9 @@ def predict_fixture(
             con, league, home_team, away_team, as_of
         )
 
-    matrix = bundle.goals.score_matrix(
-        home_team, away_team, max_goals=max_goals,
+    selections, expected_goals, expected_corners, expected_cards = build_selections(
+        bundle, home_team, away_team, referee=referee, max_goals=max_goals,
         missing_home=missing_home, missing_away=missing_away,
-    )
-    expected_goals = bundle.goals.rates(
-        home_team, away_team, missing_home, missing_away
-    )
-
-    selections: list[markets.Selection] = []
-    selections += markets.match_odds(matrix)
-    selections += markets.double_chance(matrix)
-    selections += markets.total_goals(matrix)
-    selections += markets.both_teams_to_score(matrix)
-    selections += markets.team_totals(matrix)
-    for line in _handicap_lines(expected_goals):
-        selections += markets.asian_handicap(matrix, line)
-    selections += markets.correct_score(matrix)
-
-    expected_corners = _add_count_market(
-        selections, bundle.corners, home_team, away_team, referee,
-        market="total_corners", default_lines=markets.DEFAULT_CORNER_LINES,
-    )
-    expected_cards = _add_count_market(
-        selections, bundle.cards, home_team, away_team, referee,
-        market="total_cards", default_lines=markets.DEFAULT_CARD_LINES,
     )
     if referee and bundle.cards and referee not in bundle.cards.referee_effects:
         notes.append(
@@ -383,6 +473,20 @@ def _add_count_market(
     lines = markets.suggested_lines(markets.count_mean(pmf))
     lines = tuple(sorted(set(lines) | set(default_lines)))
     selections += markets.count_totals(pmf, market, lines)
+
+    # Team totals and the handicap come from the two *team* distributions,
+    # which the model fits separately from the match total on purpose. They
+    # are a read of parameters already estimated, not a second fit.
+    home_pmf = model.team_distribution(rates[0])
+    away_pmf = model.team_distribution(rates[1])
+    team_lines = markets.suggested_lines(markets.count_mean(home_pmf), spread=1.0)
+    selections += markets.team_count_totals(home_pmf, away_pmf, market, team_lines)
+    handicap = market.replace("total_corners", "corner_handicap").replace(
+        "total_cards", "card_handicap"
+    )
+    centre = -round((rates[0] - rates[1]) * 2) / 2
+    for line in (centre - 0.5, centre, centre + 0.5):
+        selections += markets.count_handicap(home_pmf, away_pmf, handicap, line)
     return rates
 
 

@@ -176,3 +176,28 @@ def test_clicking_into_a_fixture_and_back_out_again():
     back[0].click().run()
     assert not at.exception
     assert at.session_state["view"] == "home"
+
+
+def test_the_pre_match_scan_tab_renders():
+    """The scan is the first thing in this project that looks like a tip.
+
+    Shallow like the rest of this file: it asserts the tab runs, not what it
+    says. The labelling rules it must obey are pinned in `test_evidence.py`,
+    where they can be checked without a browser.
+    """
+    at = _match_app()
+    at.run()
+    assert not at.exception
+    labels = [tab.label for tab in at.get("tab")]
+    assert "Pre-match EV scan" in labels
+    assert "Live EV scanner" not in labels
+
+
+def test_the_half_time_switch_runs_a_second_fit():
+    """Half-time markets must appear only when asked for, and never be derived."""
+    at = _match_app()
+    at.run()
+    switch = [c for c in at.sidebar.checkbox if c.label == "Half-time markets"]
+    assert switch, "the half-time switch is missing from the sidebar"
+    switch[0].set_value(True).run()
+    assert not at.exception

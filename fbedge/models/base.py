@@ -166,6 +166,54 @@ class TrainingSet:
             away_idx=self.away_idx[mask.to_numpy() if hasattr(mask, "to_numpy") else mask],
         )
 
+    def half_time(self) -> "TrainingSet":
+        """The same matches, with the half-time score standing in for the score.
+
+        **Half-time markets need their own fit and this is how they get one.**
+        They are not derivable from the full-time matrix: roughly 45% of goals
+        arrive in the first half, not 50%, and the split is not the same in
+        every league. Halving the full-time rates would produce prices that
+        look reasonable and are systematically wrong, which is the worst of the
+        three options the README weighs.
+
+        The trick is that a half is just a shorter match. `fit_goals_model`
+        needs columns called `home_goals` and `away_goals`; handing it the
+        half-time columns under those names gives a genuine independent
+        Dixon-Coles fit - its own attack and defence ratings, its own home
+        advantage, its own low-score correction - with no new machinery and no
+        second copy of the optimiser to keep in step.
+
+        `target` is forced to goals by construction: Understat publishes no
+        half-time xG, so there is nothing to blend. Matches with no half-time
+        record are dropped, which is most seasons before 1995 and none after.
+        """
+        frame = self.frame.copy()
+        if "home_goals_ht" not in frame.columns:
+            raise InsufficientData(
+                "This training set carries no half-time columns. Rebuild the "
+                "database with scripts/build_database.py."
+            )
+        playable = frame["home_goals_ht"].notna() & frame["away_goals_ht"].notna()
+        subset = self.subset(playable.to_numpy())
+        frame = subset.frame.copy()
+        frame["home_goals"] = frame["home_goals_ht"].astype(float)
+        frame["away_goals"] = frame["away_goals_ht"].astype(float)
+        # xG is full-time by definition, so leaving it in place would let a
+        # caller ask for a blend and get half-time goals blended with
+        # full-time xG. Removing it makes that request fail loudly instead.
+        for column in ("home_xg", "away_xg"):
+            if column in frame.columns:
+                frame[column] = np.nan
+        return TrainingSet(
+            league=subset.league,
+            as_of=subset.as_of,
+            frame=frame,
+            weights=subset.weights,
+            index=subset.index,
+            home_idx=subset.home_idx,
+            away_idx=subset.away_idx,
+        )
+
 
 def _has_table(con, name: str) -> bool:
     """Whether a table exists, so an optional one can be joined conditionally."""
@@ -222,6 +270,7 @@ def load_training_set(
     sql = f"""
         SELECT m.match_id, m.date, m.home_team, m.away_team, m.referee,
                m.home_goals, m.away_goals, m.home_corners, m.away_corners,
+               m.home_goals_ht, m.away_goals_ht,
                m.home_yellows, m.away_yellows, m.home_reds, m.away_reds,
                m.home_shots, m.away_shots, m.home_sot, m.away_sot,
                {xg_select},

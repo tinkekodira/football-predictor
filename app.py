@@ -25,10 +25,15 @@ import pandas as pd
 import streamlit as st
 
 from fbedge import backtest as backtest_mod
-from fbedge import config, crests, database, evaluation, markets, normalize
+from fbedge import (
+    config, crests, database, evaluation, evidence as evidence_mod, markets,
+    normalize, snapshots,
+)
 from fbedge import predict as predict_mod
 from fbedge import profile as profile_mod
 from fbedge.models import base as model_base
+
+import scan_view
 
 import home_view
 
@@ -159,6 +164,7 @@ def render_forecast(db_path, prof, league, as_of, half_life, ridge,
         con, prof.home_team, prof.away_team, as_of=as_of, league=league,
         half_life_days=half_life, ridge=ridge,
         target=target, blend_weight=blend_weight,
+        half_time=st.session_state.get("half_time_markets", False),
     )
 
     for note in forecast.notes:
@@ -184,41 +190,81 @@ def render_forecast(db_path, prof, league, as_of, half_life, ridge,
                  f"{forecast.expected_cards[1]:.1f} away",
         )
 
+    stored_evidence = evidence_mod.load(con, league)
     market_tabs = st.tabs(
-        ["Result", "Goals", "Corners & cards", "Handicap", "Scores", "Ratings"]
+        ["Result", "Goals", "Half time", "Corners", "Cards", "Handicap",
+         "Scores", "Ratings"]
     )
+
+    def show(market: str, missing: str | None = None) -> None:
+        """One market's prices, never without the evidence for that market.
+
+        The rule the README applies to sample sizes, applied to markets: a
+        number and the basis for trusting it belong on the same screen. So the
+        label is rendered *before* the table rather than in an expander below
+        it, and a market nobody has scored says so instead of showing nothing.
+        """
+        selections = forecast.market(market)
+        if not selections:
+            if missing:
+                st.info(missing)
+            return
+        row = stored_evidence[stored_evidence["market"] == market]
+        st.caption(evidence_mod.labels(row, [market])[market])
+        st.dataframe(selection_table(selections), width="stretch", hide_index=True)
+
     with market_tabs[0]:
-        st.dataframe(selection_table(forecast.market("1x2")),
-                     width="stretch", hide_index=True)
-        st.dataframe(selection_table(forecast.market("double_chance")),
-                     width="stretch", hide_index=True)
+        show("1x2")
+        show("double_chance")
+        show("draw_no_bet")
+        show("winning_margin")
     with market_tabs[1]:
-        st.dataframe(selection_table(forecast.market("total_goals")),
-                     width="stretch", hide_index=True)
-        st.dataframe(selection_table(forecast.market("btts")),
-                     width="stretch", hide_index=True)
+        show("total_goals")
+        show("btts")
+        show("home_goals")
+        show("away_goals")
+        show("odd_even_goals")
     with market_tabs[2]:
-        corners = forecast.market("total_corners")
-        cards = forecast.market("total_cards")
-        if corners:
-            st.dataframe(selection_table(corners), width="stretch", hide_index=True)
+        if forecast.market("1x2_ht"):
+            st.caption(
+                "Half-time markets come from their own Dixon-Coles fit on "
+                "half-time scores, not from the full-time matrix. About 45% of "
+                "goals arrive before the interval rather than 50%, and the "
+                "fitted half-time home advantage is larger than the full-time "
+                "one, so halving the full-time rates would be wrong twice over."
+            )
+            show("1x2_ht")
+            show("total_goals_ht")
         else:
-            st.info("No corner model: this league-season has no corner data.")
-        if cards:
-            st.dataframe(selection_table(cards), width="stretch", hide_index=True)
-        else:
-            st.info("No card model: this league-season has no booking data.")
+            st.info(
+                "Half-time markets are off by default: they need a second fit, "
+                "which roughly doubles the time this page takes. Switch them on "
+                "in the sidebar."
+            )
     with market_tabs[3]:
-        st.dataframe(selection_table(forecast.market("asian_handicap")),
-                     width="stretch", hide_index=True)
+        conditions = evidence_mod.card_conditions(con, league)
+        show("total_corners",
+             "No corner model: this league-season has no corner data.")
+        show("home_total_corners")
+        show("away_total_corners")
+        show("corner_handicap")
+    with market_tabs[4]:
+        conditions = evidence_mod.card_conditions(con, league)
+        st.caption(conditions["note"])
+        show("total_cards",
+             "No card model: this league-season has no booking data.")
+        show("home_total_cards")
+        show("away_total_cards")
+        show("card_handicap")
+    with market_tabs[5]:
+        show("asian_handicap")
         st.caption(
             "A negative line means the home side gives that start. Whole lines "
             "can push, which is why the fair price allows for a returned stake."
         )
-    with market_tabs[4]:
-        st.dataframe(selection_table(forecast.market("correct_score")),
-                     width="stretch", hide_index=True)
-    with market_tabs[5]:
+    with market_tabs[6]:
+        show("correct_score")
+    with market_tabs[7]:
         ratings = bundle.goals.ratings()
         st.dataframe(
             ratings.style.format(
@@ -464,6 +510,14 @@ st.sidebar.button(
     icon=":material/arrow_back:",
 )
 
+st.sidebar.checkbox(
+    "Half-time markets",
+    key="half_time_markets",
+    help="Fits a second Dixon-Coles model on half-time scores. They cannot be "
+         "derived from the full-time one, so this roughly doubles the fitting "
+         "time and is off unless asked for.",
+)
+
 league_names = options.drop_duplicates("league").set_index("league")["league_name"]
 _league_codes = league_names.index.tolist()
 league = st.sidebar.selectbox(
@@ -634,8 +688,8 @@ with middle:
 
 st.divider()
 
-forecast_tab, history_tab, quality_tab = st.tabs(
-    ["Model forecast", "What happened", "Model quality"]
+forecast_tab, history_tab, quality_tab, scan_tab = st.tabs(
+    ["Model forecast", "What happened", "Model quality", "Pre-match EV scan"]
 )
 
 with history_tab:
@@ -704,8 +758,12 @@ with forecast_tab:
 with quality_tab:
     render_quality(db_path, league, as_of, half_life, ridge)
 
+with scan_tab:
+    scan_view.render(db_path, half_life, ridge)
+
 st.divider()
 st.caption(
-    "Fair prices carry no bookmaker margin. Comparing them against real prices "
-    "to find value is Phase 4."
+    "Fair prices carry no bookmaker margin. The pre-match scan compares them "
+    "against the source's twice-weekly published prices, and labels every "
+    "market with the track record it actually has."
 )
