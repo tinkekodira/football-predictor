@@ -65,7 +65,7 @@ weeks, judge on the CLV from *that* period - is unchanged.
 
 ## Current status
 
-- 596 tests passing, 1 skipped (`python -m pytest`).
+- 599 tests passing, 1 skipped (`python -m pytest`).
 - **A paper-trading ledger exists, and it is the first thing here that
   accumulates evidence going forward rather than backward.** The standing rule
   has always been "paper-trade for several weeks and judge it on the CLV from
@@ -680,6 +680,30 @@ only report that something went wrong.
 The tab is deliberately incapable of writing. Recording and settling are writes
 to an append-only forward record, and a page that mutated one on every load
 would corrupt the single measurement this project cannot reconstruct.
+
+### Three reasons a bet did not settle, and only one is worth acting on
+
+Running the settle step against the live ledger exposed the next version of the
+same defect. "0 settled, 329 unmatched" is three different situations reported
+as one number: the fixture has not kicked off; it has been played but the
+result is not in the database, because `matches` only advances when
+`build_database.py` re-downloads the current season; or it was played, the
+database holds *later* matches for that league, and it still found no join -
+which is a real bug, usually a club name spelled differently by the two sources
+or a postponement beyond the one-day tolerance.
+
+Reported as one count they are indistinguishable, and somebody running this for
+a fortnight would see "0 settled" every time with no way to tell a working
+ledger from a stale database from a broken join. `settle_open` now returns
+`awaiting_kickoff`, `awaiting_results` and `unmatched_unexpected`, and only the
+last is printed loudly. Against the live ledger today all 329 are
+`awaiting_kickoff`, which is the correct answer and now a legible one.
+
+**And `paper_trade.py --no-settle` no longer demands a write connection.**
+DuckDB allows one writer, so the report refused to run whenever the app was
+open - which is exactly when somebody wants it. Reporting takes a read-only
+connection; only settling writes, and being unable to settle now prints what to
+do rather than a DuckDB traceback.
 
 ## What was added in the home-page session
 

@@ -401,6 +401,74 @@ def test_a_bet_with_no_played_match_stays_open_and_is_counted(clean, played):
     assert len(ledger.load_bets(clean, settled=False)) == 1
 
 
+def test_the_three_reasons_a_bet_did_not_settle_are_told_apart(clean, played):
+    """One "unmatched" count hides the only case worth acting on.
+
+    A fixture in the future, a fixture played but not yet ingested, and a
+    fixture played that should have joined and did not are three different
+    situations: the first needs nothing, the second needs one command, and the
+    third is a bug hunt. Reported as one number they are indistinguishable, and
+    somebody running the settle step for a fortnight would see "0 settled"
+    every time with no way to tell which they had.
+    """
+    # The three cases are defined relative to two moving boundaries: today, and
+    # the newest result the database actually holds. Anchor on both rather than
+    # on the fixture, or the dates drift into each other's categories.
+    newest = pd.Timestamp(
+        clean.execute(
+            "SELECT MAX(date) FROM matches WHERE home_goals IS NOT NULL"
+        ).fetchone()[0]
+    ).date()
+    today = newest + dt.timedelta(days=100)
+
+    ledger.record(clean, ledger.build_claims(
+        frame_of(
+            # Has not kicked off: nothing to do.
+            scan_row(
+                played, fixture_date=today + dt.timedelta(days=7),
+                home_team="Future FC", away_team="Later Town",
+                fixture_key="E0_20991231_future-fc_later-town",
+            ),
+            # Played, but after the newest result on file: needs a rebuild.
+            scan_row(
+                played, fixture_date=newest + dt.timedelta(days=50),
+                home_team="Ingest United", away_team="Pending City",
+                fixture_key="E0_20990102_ingest-united_pending-city",
+            ),
+            # Well inside the ingested window and still no join: a real problem.
+            scan_row(
+                played, fixture_date=pd.Timestamp(played["date"]).date(),
+                home_team="Mystery Rovers", away_team="Unknown Athletic",
+                fixture_key="E0_19000101_mystery-rovers_unknown-athletic",
+            ),
+        ),
+        PROVENANCE,
+    ))
+    counts = ledger.settle_open(clean, now=dt.datetime.combine(today, dt.time(12, 0)))
+
+    assert counts["unmatched"] == 3
+    assert counts["awaiting_kickoff"] == 1
+    assert counts["awaiting_results"] == 1
+    assert counts["unmatched_unexpected"] == 1
+
+
+def test_the_settle_counts_carry_the_same_keys_on_every_path(clean, played):
+    """An empty ledger, a resultless database and a normal run agree in shape.
+
+    A report that had to guard each lookup would eventually forget one, and the
+    key it forgot would be the one that mattered.
+    """
+    expected = {
+        "open", "settled", "unmatched", "unsettleable", "no_closing_price",
+        "awaiting_kickoff", "awaiting_results", "unmatched_unexpected",
+        "unmatched_rows",
+    }
+    assert set(ledger.settle_open(clean)) == expected
+
+    ledger.record(clean, ledger.build_claims(frame_of(scan_row(played)), PROVENANCE))
+    assert set(ledger.settle_open(clean)) == expected
+
+
 def test_a_withdrawn_market_leaves_the_bet_open_rather_than_losing_it(
     clean, played
 ):
@@ -525,6 +593,33 @@ def test_load_bets_can_ask_for_open_settled_or_everything(clean, played):
     assert len(ledger.load_bets(clean)) == 2
     assert len(ledger.load_bets(clean, settled=True)) == 1
     assert len(ledger.load_bets(clean, settled=False)) == 1
+
+
+def test_the_report_runs_without_a_write_connection(tmp_path, monkeypatch, capsys):
+    """`--no-settle` must work while the app has the database open.
+
+    DuckDB allows one writer, so a report that asked for a write connection
+    would refuse to run exactly when somebody most wants it - with the app
+    open in front of them. Only the settling half writes.
+    """
+    from scripts import paper_trade
+
+    path = tmp_path / "report.duckdb"
+    con = database.connect(path)
+    ledger.create_tables(con)
+    con.close()
+
+    monkeypatch.setattr(
+        sys, "argv", ["paper_trade.py", "--no-settle", "--db", str(path)]
+    )
+    # A second, live read-only connection stands in for the running app: if the
+    # report needed to write, this would make it fail.
+    holder = database.connect(path, read_only=True)
+    try:
+        assert paper_trade.main() == 0
+    finally:
+        holder.close()
+    assert "Paper-trading ledger" in capsys.readouterr().out
 
 
 def test_the_ledger_reads_as_empty_before_its_tables_exist(ledger_db, tmp_path):

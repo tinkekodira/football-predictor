@@ -597,18 +597,27 @@ def settle_open(
     )
     stamp = now or dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
 
+    # Every caller can rely on the same keys being present whichever path is
+    # taken, so a report never has to guard each lookup individually.
+    base = {"open": 0, "settled": 0, "unmatched": 0, "unsettleable": 0,
+            "no_closing_price": 0, "awaiting_kickoff": 0, "awaiting_results": 0,
+            "unmatched_unexpected": 0, "unmatched_rows": pd.DataFrame()}
+
     open_bets = load_bets(con, settled=False)
     if open_bets.empty:
-        return {"open": 0, "settled": 0, "unmatched": 0, "unsettleable": 0,
-                "no_closing_price": 0, "unmatched_rows": pd.DataFrame()}
+        return base
 
     matches = con.execute(
         "SELECT * FROM matches WHERE home_goals IS NOT NULL"
     ).df()
     if matches.empty:
-        return {"open": int(len(open_bets)), "settled": 0,
-                "unmatched": int(len(open_bets)), "unsettleable": 0,
-                "no_closing_price": 0, "unmatched_rows": open_bets}
+        return {
+            **base,
+            "open": int(len(open_bets)),
+            "unmatched": int(len(open_bets)),
+            "unmatched_rows": open_bets,
+            **_classify_unmatched(open_bets, matches, stamp.date()),
+        }
 
     joined = _join_to_matches(open_bets, matches, window)
     matched = joined[joined["match_id"].notna()]
@@ -704,14 +713,61 @@ def settle_open(
         )
         con.unregister("new_settlements")
 
+    reasons = _classify_unmatched(unmatched, matches, stamp.date())
     return {
+        **base,
         "open": int(len(open_bets)),
         "settled": int(len(written)),
         "unmatched": int(len(unmatched)),
         "unsettleable": int(unsettleable),
         "no_closing_price": int(no_close),
         "unmatched_rows": unmatched,
+        **reasons,
     }
+
+
+def _classify_unmatched(unmatched: pd.DataFrame, matches: pd.DataFrame,
+                        today: dt.date) -> dict:
+    """Why each unsettled bet did not settle, split into three different things.
+
+    **A bet that did not settle has three possible reasons and only one of them
+    is worth acting on.** Reported as a single "unmatched" count they are
+    indistinguishable, which is the shape of bug this project keeps paying for:
+    the fixture has not kicked off yet; it has been played but the result is
+    not in the database, because `matches` only advances when
+    `build_database.py` re-downloads the current season; or it was played, the
+    database holds later matches for that league, and the bet still found no
+    join - which is a real defect, usually a club name or a postponement beyond
+    the date tolerance.
+
+    Without this split, somebody running the settle step for a fortnight would
+    see "0 settled" every time and have no way to tell a working ledger from a
+    stale database from a broken join. The first is normal, the second is one
+    command, and the third is a bug hunt.
+    """
+    empty = {"awaiting_kickoff": 0, "awaiting_results": 0, "unmatched_unexpected": 0}
+    if unmatched.empty:
+        return empty
+
+    # The latest *result* on file per league. A league absent from this map has
+    # no played matches at all, so nothing there can have been ingested yet.
+    latest = (
+        matches.assign(date=pd.to_datetime(matches["date"]))
+        .groupby("league")["date"].max().dt.date.to_dict()
+    )
+
+    counts = dict(empty)
+    for row in unmatched.itertuples():
+        fixture_date = pd.Timestamp(row.fixture_date).date()
+        if fixture_date >= today:
+            counts["awaiting_kickoff"] += 1
+            continue
+        newest = latest.get(row.league)
+        if newest is None or newest < fixture_date:
+            counts["awaiting_results"] += 1
+        else:
+            counts["unmatched_unexpected"] += 1
+    return counts
 
 
 def _join_to_matches(bets: pd.DataFrame, matches: pd.DataFrame,

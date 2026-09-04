@@ -216,6 +216,7 @@ def _render_open(frame: pd.DataFrame) -> None:
         )
         return
 
+    st.markdown("#### Open bets, waiting on a result")
     st.caption(
         f"{len(open_bets):,} claim(s) on fixtures that have not been played, "
         "or that have been played but not yet settled. Settling is "
@@ -245,6 +246,7 @@ def _render_settled(frame: pd.DataFrame, comparison: pd.DataFrame) -> None:
         _render_comparison(comparison)
         return
 
+    st.markdown("#### Settled claims, and the closing line value each earned")
     st.caption(
         f"{len(settled):,} settled claim(s). `CLV` is the price taken against "
         "the margin-free closing line: positive means the price beat the "
@@ -290,6 +292,7 @@ def _render_withheld(frame: pd.DataFrame) -> None:
         st.info("No selection has been withheld.")
         return
 
+    st.markdown("#### Withheld selections, and the reason for each")
     st.caption(
         f"{len(withheld):,} selection(s) recorded but never staked. These are "
         "not the best bets on the board — they are the ones where the model "

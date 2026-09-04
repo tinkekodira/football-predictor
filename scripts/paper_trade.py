@@ -56,17 +56,55 @@ def main() -> int:
         print(f"No database at {args.db}. Run scripts/build_database.py first.")
         return 1
 
-    con = database.connect(args.db)
+    # **Only the settling half needs to write.** DuckDB allows one writer, so
+    # asking for a write connection to print a report means this refuses to run
+    # whenever the app is open - which is exactly when somebody is most likely
+    # to want the report. Reporting takes a read-only connection and coexists
+    # with the app happily.
+    try:
+        con = database.connect(args.db, read_only=args.no_settle)
+    except Exception as error:
+        if "another process" not in str(error):
+            raise
+        print(
+            "The database is open in another process, and settling needs to "
+            "write to it.\n\nStop the app (`streamlit run app.py`) and run this "
+            "again, or pass --no-settle to read the ledger without settling "
+            "anything - that works alongside a running app."
+        )
+        return 1
+
     leagues = args.league or None
 
     if not args.no_settle:
         counts = ledger.settle_open(con)
         print(f"Settled {counts['settled']} of {counts['open']} open bet(s).")
-        if counts["unmatched"]:
+        # **Three different reasons, and only the last is worth acting on.**
+        # Reported as one "unmatched" count they are indistinguishable, and
+        # somebody running this for a fortnight would see "0 settled" every
+        # time with no way to tell a working ledger from a stale database from
+        # a broken join.
+        if counts["awaiting_kickoff"]:
             print(
-                f"  {counts['unmatched']} still open: no played match to join "
-                "to yet. That is the normal state of a bet on a fixture that "
-                "has not been played."
+                f"  {counts['awaiting_kickoff']} waiting on a kick-off. That "
+                "is the normal state of a bet on a fixture in the future, and "
+                "nothing needs doing."
+            )
+        if counts["awaiting_results"]:
+            print(
+                f"  {counts['awaiting_results']} played, but the result is not "
+                "in the database yet. `matches` only advances when the current "
+                "season is re-downloaded:\n"
+                "      python scripts/build_database.py"
+            )
+        if counts["unmatched_unexpected"]:
+            print(
+                f"  {counts['unmatched_unexpected']} PLAYED AND STILL "
+                "UNMATCHED. The database holds later matches for those "
+                "leagues, so these should have joined and did not - usually a "
+                "club name the two sources spell differently, or a "
+                "postponement beyond the one-day tolerance. Worth looking at; "
+                "run with --open to see them."
             )
         if counts["unsettleable"]:
             print(
