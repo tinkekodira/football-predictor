@@ -576,10 +576,28 @@ while whether you consistently beat the closing price is measurable in weeks.
 thing this project produces that looks like a betting tip, and it is not one. A
 positive expected value means the model disagrees with the price — and the
 evidence above is that when this model disagrees with a closing line, the model
-is usually the one that is wrong. Every row of the scan carries that record,
-and the first live run put two newly promoted clubs at the top of the table at
-+68% and +50%, on two matches of history each, which is what a model
-disagreeing out of ignorance looks like.
+is usually the one that is wrong.
+
+**So the scan refuses to rank its own biggest numbers.** The first live run put
+two newly promoted clubs at the top of the table at +68% and +50%, on two
+matches of history each, which is what a model disagreeing out of ignorance
+looks like. Two ceilings now stop that, both set from measurement:
+
+| Rule | Threshold | What it is based on |
+|---|---|---|
+| Too little history | either side under 5 matches | Across five leagues and 19,112 settled bets, fixtures where the thinner side had 0–4 matches carried a mean expected value of **+17.5% against +12.8%** elsewhere — and did not go on to do better |
+| Too large to believe | expected value over +20% | On E0 2022–26, +20% is the 78th percentile of the model's own claimed edges. Bets above it returned −5.2% against +2.1% for the rest |
+
+Read the second row carefully: over a few hundred bets ROI is close to noise,
+so that is *an absence of evidence that the big numbers are better*, not proof
+they are worse. It is enough. A model whose closing line value is −1.5% over
+nine seasons is not finding +40% edges, and a table sorted on expected value
+puts its largest errors at the top.
+
+Withheld selections are **printed under their own heading with the reason, not
+dropped** — a fixture missing from a scan looks exactly like a fixture nobody
+priced, and those must stay distinguishable. `--include-withheld` puts them
+back in the sort, and `--min-matches` / `--max-ev` move the thresholds.
 
 Treat this as a software and statistics project, which is where its real value
 is. Nothing should be staked until a full backtest plus a stretch of

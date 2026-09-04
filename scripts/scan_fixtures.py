@@ -23,6 +23,16 @@ with no track record attached is the single most misleading thing this project
 could print, and the project's own record says this model has never beaten the
 closing line. See `HANDOFF.md`. Nothing here is a recommendation to stake
 money.
+
+**The scan refuses to rank its own biggest numbers**, on two measured grounds.
+A fixture where either side has fewer than `config.SCAN_MIN_TEAM_MATCHES`
+matches is priced mostly from the promoted-team prior; across five leagues and
+19,112 settled bets those carried a mean expected value of +17.5% against
++12.8% elsewhere without doing any better. And anything claiming more than
+`config.SCAN_MAX_TRUSTED_EV` is withheld whatever the sample, because a model
+with negative closing line value is not finding edges that size. Both are
+printed under their own heading with the reason - withheld from the sort, never
+dropped from the output.
 """
 
 from __future__ import annotations
@@ -53,6 +63,8 @@ def scan(
     half_life_days: float = base.DEFAULT_HALF_LIFE_DAYS,
     ridge: float | None = None,
     fair_line_preference: tuple[str, ...] = backtest.FAIR_LINE_PREFERENCE,
+    min_matches: int | None = None,
+    max_ev: float | None = None,
 ) -> tuple[pd.DataFrame, list[str]]:
     """Every archived selection for an unplayed fixture, priced and valued.
 
@@ -95,12 +107,21 @@ def scan(
                 continue
             rows += _value_fixture(
                 bundle, fixture, fixture_odds, price_source, margin_method,
-                fair_line_preference,
+                fair_line_preference, min_matches, max_ev,
             )
     frame = pd.DataFrame(rows)
     if not frame.empty:
+        frame["withheld"] = frame["withheld_reason"] != ""
         frame = frame.sort_values("expected_value", ascending=False).reset_index(drop=True)
     return frame, notes
+
+
+def _sample_sizes(bundle, fixture) -> tuple[int, int]:
+    """How many matches the model has seen of each side, home then away."""
+    return tuple(
+        bundle.goals.sample_size(team) if bundle.goals.is_known(team) else 0
+        for team in (fixture.home_team, fixture.away_team)
+    )
 
 
 def _thin_history(bundle, fixture) -> str:
@@ -114,7 +135,9 @@ def _thin_history(bundle, fixture) -> str:
     bets on the board when they are the ones the model knows least about.
 
     Confirmed on the first live run of this scan: the top four rows were two
-    newly promoted clubs with one match of history each.
+    newly promoted clubs with one match of history each. Below
+    `config.SCAN_MIN_TEAM_MATCHES` this stops being a note and becomes a
+    refusal to rank - see `_withhold`.
     """
     thin = []
     for team in (fixture.home_team, fixture.away_team):
@@ -127,12 +150,64 @@ def _thin_history(bundle, fixture) -> str:
     return "; ".join(thin)
 
 
+def _withhold(
+    n_home: int,
+    n_away: int,
+    expected_value: float,
+    min_matches: int | None = None,
+    max_ev: float | None = None,
+) -> str:
+    """Why this selection should not be ranked, or "" if it should.
+
+    **Withheld, not dropped.** These rows stay in the returned frame and are
+    printed under their own heading with the reason; what they lose is their
+    place in a table sorted by expected value. Silently discarding them would
+    be the worse failure - a fixture missing from a scan looks exactly like a
+    fixture nobody priced - and this project has been bitten by that shape of
+    bug before.
+
+    Two independent grounds, and a row can trip both.
+
+    **Too little history.** Below `config.SCAN_MIN_TEAM_MATCHES` a team's
+    rating is mostly the promoted-team prior. Across five leagues and 19,112
+    settled bets, selections where the thinner side had fewer than five matches
+    carried a mean expected value of +17.5% against +12.8% for everything else,
+    and did not go on to do better. The extra edge is the model describing how
+    little it knows.
+
+    **Too large to believe.** Above `config.SCAN_MAX_TRUSTED_EV`, regardless of
+    sample. A model whose closing line value is -1.5% over nine seasons is not
+    finding +40% edges; it is being wrong, and a table sorted on the number
+    puts its largest errors at the top. On E0 2022-2026 the bets above +20%
+    were the top fifth of the model's claimed edges and returned -5.2% against
+    +2.1% for the rest - which over a few hundred bets is not proof they are
+    worse, but is a clear absence of evidence that they are better.
+    """
+    floor = config.SCAN_MIN_TEAM_MATCHES if min_matches is None else min_matches
+    ceiling = config.SCAN_MAX_TRUSTED_EV if max_ev is None else max_ev
+    reasons = []
+    thinner = min(n_home, n_away)
+    if thinner < floor:
+        reasons.append(
+            f"one side has {thinner} match{'' if thinner == 1 else 'es'} of "
+            f"history, under the {floor} this scan requires"
+        )
+    if np.isfinite(expected_value) and expected_value > ceiling:
+        reasons.append(
+            f"expected value {expected_value:+.0%} is above the "
+            f"{ceiling:+.0%} this model has earned the right to claim"
+        )
+    return "; and ".join(reasons)
+
+
 def _value_fixture(
-    bundle, fixture, fixture_odds, price_source, margin_method, fair_line_preference
+    bundle, fixture, fixture_odds, price_source, margin_method,
+    fair_line_preference, min_matches=None, max_ev=None,
 ) -> list[dict]:
     """One fixture's selections, valued against the model."""
     matrix = bundle.goals.score_matrix(fixture.home_team, fixture.away_team)
     thin = _thin_history(bundle, fixture)
+    n_home, n_away = _sample_sizes(bundle, fixture)
 
     # The same function the backtest uses, so the margin-free probability a
     # scan quotes and the one a CLV figure was measured against are produced by
@@ -178,6 +253,15 @@ def _value_fixture(
                 "collection_window": fixture.collection_window,
                 "pulled_at_utc": fixture.first_pulled_at_utc,
                 "thin_history": thin,
+                "n_home": n_home,
+                "n_away": n_away,
+                "withheld_reason": _withhold(
+                    n_home, n_away,
+                    pricing.expected_value(
+                        priced.probability, price, priced.push_probability
+                    ),
+                    min_matches, max_ev,
+                ),
             }
         )
     return out
@@ -194,6 +278,23 @@ def main() -> int:
                              "assumes, so scan and backtest output are comparable.")
     parser.add_argument("--min-edge", type=float, default=0.0,
                         help="Hide selections below this expected value")
+    parser.add_argument("--min-matches", type=int,
+                        default=config.SCAN_MIN_TEAM_MATCHES,
+                        help="Withhold a fixture from the ranked table when "
+                             "either side has fewer matches than this "
+                             "(default: %(default)s). Below it a rating is "
+                             "mostly the promoted-team prior, and the claimed "
+                             "edge is the model describing its own ignorance.")
+    parser.add_argument("--max-ev", type=float,
+                        default=config.SCAN_MAX_TRUSTED_EV,
+                        help="Withhold selections claiming more than this "
+                             "(default: %(default)s). This model's closing "
+                             "line value is negative; it does not find edges "
+                             "this large.")
+    parser.add_argument("--include-withheld", action="store_true",
+                        help="Rank the withheld rows alongside the rest. They "
+                             "are shown either way; this puts them back in the "
+                             "sort, which is what the measurement says not to do.")
     parser.add_argument("--top", type=int, default=25)
     parser.add_argument("--half-life", type=float, default=base.DEFAULT_HALF_LIFE_DAYS)
     parser.add_argument("--ridge", type=float, default=None)
@@ -245,6 +346,7 @@ def main() -> int:
     frame, notes = scan(
         con, as_of, leagues, price_source,
         half_life_days=args.half_life, ridge=args.ridge,
+        min_matches=args.min_matches, max_ev=args.max_ev,
     )
 
     if frame.empty:
@@ -268,7 +370,11 @@ def main() -> int:
 
 
 def _render(frame, stored_evidence, args, as_of, con) -> None:
-    shown = frame[frame["expected_value"] >= args.min_edge].head(args.top)
+    eligible = frame[frame["expected_value"] >= args.min_edge]
+    withheld = eligible[eligible["withheld"]]
+    if not args.include_withheld:
+        eligible = eligible[~eligible["withheld"]]
+    shown = eligible.head(args.top)
     width = 100
     print()
     print("=" * width)
@@ -285,6 +391,7 @@ def _render(frame, stored_evidence, args, as_of, con) -> None:
     if shown.empty:
         print(f"  No selection reaches {args.min_edge:+.1%} expected value.")
         print("  That is the ordinary result and the reassuring one.")
+        _render_withheld(withheld, width, args)
         return
 
     print(
@@ -309,18 +416,19 @@ def _render(frame, stored_evidence, args, as_of, con) -> None:
     thin_rows = shown[shown["thin_history"] != ""]
     if len(thin_rows):
         print()
-        print("  (*) The model barely knows one of these sides")
+        print("  (*) The model has limited history on one of these sides")
         print("  " + "-" * (width - 2))
         for fixture_name, note in sorted(
             set(zip(thin_rows["fixture"], thin_rows["thin_history"]))
         ):
             print(f"  {fixture_name}: {note}.")
         print(
-            "  A rating built mostly from the promoted-team prior is a guess, not\n"
-            "  a measurement, so a large disagreement with the market on these\n"
-            "  fixtures is the expected output of a model that does not know the\n"
-            "  team - not a mispricing it has found."
+            "  These clear the hard floor below, but a rating built substantially\n"
+            "  from the promoted-team prior is still part guess, so read the edge\n"
+            "  as less certain than the same number on an established side."
         )
+
+    _render_withheld(withheld, width, args)
 
     print()
     print("  What each evidence tag means")
@@ -344,6 +452,43 @@ def _render(frame, stored_evidence, args, as_of, con) -> None:
         "  strongest evidence available that the disagreement is the model's\n"
         "  error rather than the market's. Read HANDOFF.md before staking\n"
         "  anything, and paper-trade first if you ever do."
+    )
+
+
+def _render_withheld(withheld, width: int, args) -> None:
+    """Print what was kept out of the ranking, and why.
+
+    **Shown, never dropped.** A fixture missing from a scan looks exactly like
+    a fixture nobody priced, and the two must stay distinguishable. What these
+    rows lose is their place in a table sorted by expected value - which is the
+    whole problem with them, because that sort puts the model's largest errors
+    at the top.
+    """
+    if not len(withheld):
+        return
+    print()
+    if args.include_withheld:
+        print(f"  {len(withheld)} of the rows above are normally withheld "
+              "(--include-withheld is on)")
+    else:
+        print(f"  WITHHELD FROM THE RANKING: {len(withheld)} selection(s)")
+    print("  " + "-" * (width - 2))
+    for row in withheld.head(args.top).itertuples():
+        print(
+            f"  {row.fixture[:25]:<26}{row.market:<17}{row.selection[:12]:<13}"
+            f"{row.price:>7.2f}{row.model_probability:>8.1%}"
+            f"{row.expected_value:>+8.1%}"
+        )
+        print(f"      {row.withheld_reason}.")
+    if len(withheld) > args.top:
+        print(f"  ... and {len(withheld) - args.top} more.")
+    print(
+        "\n  These are not the best bets on the board. They are the selections\n"
+        "  where the model is least entitled to an opinion - a side it has\n"
+        "  barely seen, or an edge larger than anything its own track record\n"
+        "  supports. Measured across five leagues and 19,112 settled bets, a\n"
+        "  fixture with a side under five matches carried a mean expected value\n"
+        "  of +17.5% against +12.8% elsewhere, and did not go on to do better."
     )
 
 

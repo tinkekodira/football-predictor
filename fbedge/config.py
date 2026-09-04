@@ -137,6 +137,45 @@ FIXTURES_MAX_AGE_HOURS = 72.0
 # prices and nothing else.
 SNAPSHOT_EXPORT_DIR = DATA_DIR / "snapshots"
 
+# --------------------------------------------------------------------------
+# What the pre-match scan refuses to rank
+# --------------------------------------------------------------------------
+# Two ceilings, both set from measurement rather than taste, and both about the
+# same failure: the scan's largest numbers are the ones least worth reading.
+
+# Below this many prior matches in the training window, a team's rating is
+# mostly the promoted-team prior - a deliberately pessimistic guess rather than
+# a measurement - so the model's disagreement with the market is a statement
+# about its own ignorance.
+#
+# **Measured, five leagues, 2022-2026, 19,112 settled bets.** Grouping every
+# bet by the thinner side's match count at the time:
+#
+#   thinner side had   bets    mean EV   median EV   realised ROI
+#   0-4 matches         290     +17.5%      +12.4%          -8.0%
+#   5-9 matches         263     +16.2%      +12.1%          +4.0%
+#   10-24 matches       704     +12.5%       +8.9%         -10.3%
+#   25 or more       17,855     +12.8%       +9.1%          -4.9%
+#
+# The claimed edge on a barely-known team runs about a third higher than on a
+# known one, and nothing in four seasons suggests it is earned. Five is the
+# cut because that is where the inflation is concentrated; the ROI column is a
+# few hundred bets deep and is not evidence of anything on its own.
+SCAN_MIN_TEAM_MATCHES = 5
+
+# Expected value above which a selection is withheld from the ranked table
+# whatever the sample size.
+#
+# **Also measured**, E0 2022-2026, on the 4,175 bets the backtest settled:
+# +20% is the 78th percentile of the model's own claimed edges, and the bets
+# above it did not do better. Their realised ROI was -5.2% against +2.1% for
+# everything at or below it. Over a few hundred bets ROI is close to noise, so
+# read that as "no evidence the big numbers are better", not as "they are
+# worse" - but a model whose closing line value is -1.5% quoting +68% is
+# describing its own error, and a table that sorts on the number puts the
+# largest errors at the top.
+SCAN_MAX_TRUSTED_EV = 0.20
+
 # How far a snapshot's fixture date may drift from the played match's date and
 # still be the same match. One day catches postponements and late kick-offs
 # that roll over midnight, and is tight enough that two legs of a tie cannot

@@ -435,6 +435,52 @@ explanation rather than silently failing to match. And
 this is exactly the kind of two-line derivation somebody re-adds while
 enumerating what a score matrix can produce.
 
+## B17. The scan's largest numbers were its least trustworthy — FIXED
+
+**Severity: high, and of a kind this project cares about more than most. It
+was not a wrong number; it was a correct number presented so that the worst
+rows sorted to the top.**
+
+A pre-match scan sorted by expected value ranks the model's confidence. Its
+confidence is highest where it knows least, so the first live run led with two
+newly promoted clubs at +68% and +50% EV on two matches of history each.
+Nothing was miscomputed — the promoted-team prior is deliberately pessimistic,
+the market disagrees, and the arithmetic follows. The presentation was the
+defect.
+
+**Measured before fixing, five leagues, 2022-2026, 19,112 settled bets**,
+grouping every bet by the thinner side's match count at the time:
+
+| thinner side had | bets | mean EV | median EV | realised ROI |
+|---|---|---|---|---|
+| 0-4 matches | 290 | **+17.5%** | +12.4% | -8.0% |
+| 5-9 matches | 263 | +16.2% | +12.1% | +4.0% |
+| 10-24 matches | 704 | +12.5% | +8.9% | -10.3% |
+| 25 or more | 17,855 | **+12.8%** | +9.1% | -4.9% |
+
+The claimed edge on a barely-known side runs about a third higher and does not
+pay for it. The ROI column is a few hundred bets deep in the thin buckets and
+is not evidence on its own — the mean-EV column is the finding.
+
+**And separately, by EV band** (E0, 4,175 settled bets): +20% is the 78th
+percentile of the model's own claimed edges, and the bets above it returned
+-5.2% against +2.1% for everything at or below. Over a few hundred bets that is
+an absence of evidence that they are better, not proof they are worse. It is
+enough to stop ranking on them.
+
+**FIXED 2026-09-04.** `config.SCAN_MIN_TEAM_MATCHES` (5) and
+`config.SCAN_MAX_TRUSTED_EV` (0.20), applied in `scan_fixtures._withhold`. A
+row tripping either is withheld from the ranked table and printed under its own
+heading with the reason. **Withheld, never dropped** — a fixture absent from a
+scan looks exactly like a fixture nobody priced, and this project has been
+bitten by that shape of bug before. `--include-withheld` restores the old
+behaviour for anyone who wants it, and both thresholds are flags.
+
+**What this does not fix.** The ranking is still a ranking of the model's
+disagreement with the market, and the model's closing line value is still
+negative. Removing the rows where it is most obviously wrong does not make the
+remaining ones right. See the gate section at the top of `HANDOFF.md`.
+
 ---
 
 ## Not bugs — open questions, kept here so they stay visible

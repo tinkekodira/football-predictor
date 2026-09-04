@@ -40,7 +40,8 @@ def _connection(db_path: str):
 
 @st.cache_data(show_spinner="Fitting models and pricing the board...", ttl=900)
 def _scan(db_path: str, as_of: dt.date, leagues: tuple[str, ...],
-          book: str | None, half_life: float, ridge: float | None):
+          book: str | None, half_life: float, ridge: float | None,
+          min_matches: int, max_ev: float):
     """Cached so that changing a filter does not refit five leagues."""
     con = _connection(db_path)
     predict_mod.clear_model_cache()
@@ -48,8 +49,53 @@ def _scan(db_path: str, as_of: dt.date, leagues: tuple[str, ...],
     frame, notes = scan_fixtures.scan(
         con, as_of, list(leagues), price_source,
         half_life_days=half_life, ridge=ridge,
+        min_matches=min_matches, max_ev=max_ev,
     )
     return frame, notes
+
+
+def _render_withheld(withheld) -> None:
+    """Show what was kept out of the ranking, and why.
+
+    **Withheld, never dropped.** A fixture missing from a scan looks exactly
+    like a fixture nobody priced. What these rows lose is their place in a
+    table sorted by expected value, which is the whole problem with them: that
+    sort puts the model's largest errors at the top.
+
+    Collapsed rather than laid out, because the point is that they are not the
+    interesting rows - and expanded on click, because hiding them would be the
+    thing this project does not do.
+    """
+    if not len(withheld):
+        return
+    with st.expander(
+        f"Withheld from the ranking: {len(withheld)} selection(s), "
+        "and why",
+        expanded=False,
+    ):
+        st.caption(
+            "These are not the best bets on the board. They are the selections "
+            "where the model is least entitled to an opinion: a side it has "
+            "barely seen, or an edge larger than anything its own track record "
+            "supports. Measured across five leagues and 19,112 settled bets, a "
+            "fixture with a side under "
+            f"{config.SCAN_MIN_TEAM_MATCHES} matches carried a mean expected "
+            "value of +17.5% against +12.8% elsewhere, and did not go on to do "
+            "better."
+        )
+        table = withheld[
+            ["league", "fixture", "market", "selection", "price",
+             "model_probability", "expected_value", "withheld_reason"]
+        ].rename(
+            columns={"model_probability": "model", "expected_value": "EV",
+                     "withheld_reason": "why it is withheld"}
+        )
+        st.dataframe(
+            table.style.format(
+                {"price": "{:.2f}", "model": "{:.1%}", "EV": "{:+.1%}"}
+            ),
+            width="stretch", hide_index=True,
+        )
 
 
 def render(db_path: str, half_life: float, ridge: float | None) -> None:
@@ -59,7 +105,11 @@ def render(db_path: str, half_life: float, ridge: float | None) -> None:
     st.caption(
         "Prices published by football-data.co.uk, collected Friday afternoons "
         "no later than 17:00 British time for weekend fixtures and Tuesdays no "
-        "later than 13:00 for midweek ones. Not a live feed, and not advice."
+        "later than 13:00 for midweek ones. Not a live feed, and not advice. "
+        f"Selections where a side has under {config.SCAN_MIN_TEAM_MATCHES} "
+        f"matches of history, or claiming over "
+        f"{config.SCAN_MAX_TRUSTED_EV:+.0%}, are withheld from the ranking and "
+        "listed separately."
     )
 
     stored = snapshots.load_snapshots(con, leagues=list(config.LEAGUES))
@@ -111,17 +161,21 @@ def render(db_path: str, half_life: float, ridge: float | None) -> None:
     frame, notes = _scan(
         db_path, dt.date.today(), tuple(sorted(leagues)),
         None if book == "market maximum" else book, half_life, ridge,
+        config.SCAN_MIN_TEAM_MATCHES, config.SCAN_MAX_TRUSTED_EV,
     )
     if frame.empty:
         st.info("Nothing to scan. " + " ".join(notes))
         return
 
-    shown = frame[frame["expected_value"] >= min_edge]
+    eligible = frame[frame["expected_value"] >= min_edge]
+    withheld = eligible[eligible["withheld"]]
+    shown = eligible[~eligible["withheld"]]
     if shown.empty:
         st.success(
             f"No selection reaches {min_edge:+.0%} expected value. That is the "
             "ordinary result and the reassuring one."
         )
+        _render_withheld(withheld)
         return
 
     stored_evidence = evidence_mod.load(con)
@@ -152,12 +206,13 @@ def render(db_path: str, half_life: float, ridge: float | None) -> None:
 
     if (shown["thin_history"] != "").any():
         st.warning(
-            "Some rows involve a club the model barely knows - see the last "
-            "column. A rating built mostly from the promoted-team prior is a "
-            "guess, not a measurement, so a large disagreement with the market "
-            "there is the expected output of a model that does not know the "
-            "team, not a mispricing it has found."
+            "Some rows involve a club with limited history - see the last "
+            "column. They clear the hard floor, but a rating built substantially "
+            "from the promoted-team prior is still part guess, so read the edge "
+            "as less certain than the same number on an established side."
         )
+
+    _render_withheld(withheld)
 
     with st.expander("What the evidence column means, market by market"):
         for market in sorted(shown["market"].unique()):

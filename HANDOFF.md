@@ -47,9 +47,15 @@ the table. What the build does about it:
 - The scan's footer states that this model has never beaten the closing line
   and that a positive EV means the model disagrees with the price, not that the
   model is right.
-- Fixtures involving a club the model barely knows are flagged inline. This was
-  not theoretical: the first live run put two newly promoted clubs in the top
-  four rows at +68% and +50% EV, on two matches of history each.
+- Fixtures involving a club the model barely knows are not merely flagged, they
+  are **withheld from the ranking**. This was not theoretical: the first live
+  run put two newly promoted clubs in the top four rows at +68% and +50% EV, on
+  two matches of history each. Measured afterwards across five leagues and
+  19,112 settled bets, selections where the thinner side had under five matches
+  carried a mean EV of +17.5% against +12.8% elsewhere without doing better, so
+  the floor is a measurement rather than a preference. A second ceiling
+  withholds anything over +20% whatever the sample. Both are printed with their
+  reason rather than dropped. See BACKLOG B17.
 
 **The gate rule stands.** Nothing about building the scan is evidence for
 staking money, and the sequence in the standing rules - paper-trade for several

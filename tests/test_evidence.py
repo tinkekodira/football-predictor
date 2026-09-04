@@ -438,3 +438,120 @@ def test_half_time_markets_are_absent_unless_asked_for(scan_db, as_of):
     )
     assert not forecast.market("1x2_ht")
     assert not forecast.market("total_goals_ht")
+
+
+# --------------------------------------------------------------------------
+# What the scan refuses to rank
+# --------------------------------------------------------------------------
+# Two measured ceilings. A fixture where a side has under
+# config.SCAN_MIN_TEAM_MATCHES matches is priced mostly from the promoted-team
+# prior; across five leagues and 19,112 settled bets those carried a mean
+# expected value of +17.5% against +12.8% elsewhere without doing better. And
+# anything over config.SCAN_MAX_TRUSTED_EV is withheld whatever the sample,
+# because a model with negative closing line value does not find edges that big.
+
+def test_a_side_under_the_match_floor_is_withheld():
+    reason = scan_fixtures._withhold(2, 300, 0.05, min_matches=5, max_ev=0.20)
+    assert "2 matches of history" in reason
+    assert "under the 5" in reason
+
+
+def test_the_floor_reads_the_thinner_side_not_the_average():
+    """One unknown side is enough. Averaging would let a famous opponent
+    launder a promoted club's rating into looking established."""
+    assert scan_fixtures._withhold(300, 1, 0.05, min_matches=5, max_ev=0.20)
+    assert scan_fixtures._withhold(1, 300, 0.05, min_matches=5, max_ev=0.20)
+
+
+def test_a_team_on_the_floor_exactly_is_allowed():
+    """Strictly fewer than the floor, so five matches passes."""
+    assert scan_fixtures._withhold(5, 40, 0.05, min_matches=5, max_ev=0.20) == ""
+
+
+def test_an_implausible_edge_is_withheld_even_on_a_well_known_team():
+    reason = scan_fixtures._withhold(300, 300, 0.68, min_matches=5, max_ev=0.20)
+    assert "expected value +68%" in reason
+    assert "earned the right to claim" in reason
+
+
+def test_both_grounds_are_reported_when_both_apply():
+    reason = scan_fixtures._withhold(2, 300, 0.68, min_matches=5, max_ev=0.20)
+    assert "2 matches" in reason
+    assert "+68%" in reason
+    assert "; and " in reason
+
+
+def test_an_ordinary_selection_is_not_withheld():
+    assert scan_fixtures._withhold(300, 300, 0.05, min_matches=5, max_ev=0.20) == ""
+
+
+def test_a_negative_edge_is_never_withheld_for_being_large():
+    assert scan_fixtures._withhold(300, 300, -0.40, min_matches=5, max_ev=0.20) == ""
+
+
+def test_withheld_rows_stay_in_the_frame_rather_than_being_dropped(
+    scan_db, as_of, archived
+):
+    """A fixture missing from a scan looks exactly like one nobody priced.
+
+    The rule demotes rows out of the ranking; it must never delete them, or the
+    output stops being a complete picture of what the source offered.
+    """
+    predict_mod.clear_model_cache()
+    everything, _ = scan_fixtures.scan(
+        scan_db, as_of, ["E0"], backtest.DEFAULT_PRICE_SOURCE,
+        min_matches=1000, max_ev=0.0,   # withhold absolutely everything
+    )
+    assert not everything.empty
+    assert everything["withheld"].all()
+    assert (everything["withheld_reason"] != "").all()
+
+    # And with the rule switched off, the same rows come back unflagged.
+    permissive, _ = scan_fixtures.scan(
+        scan_db, as_of, ["E0"], backtest.DEFAULT_PRICE_SOURCE,
+        min_matches=0, max_ev=10.0,
+    )
+    assert len(permissive) == len(everything)
+    assert not permissive["withheld"].any()
+
+
+def test_the_floor_removes_the_biggest_numbers_from_the_ranking(
+    scan_db, as_of, archived
+):
+    """The point of the rule, stated as an outcome rather than a mechanism."""
+    predict_mod.clear_model_cache()
+    frame, _ = scan_fixtures.scan(
+        scan_db, as_of, ["E0"], backtest.DEFAULT_PRICE_SOURCE,
+        min_matches=0, max_ev=0.05,
+    )
+    ranked = frame[~frame["withheld"]]
+    if ranked.empty:
+        pytest.skip("nothing survived the cap in this sample")
+    assert ranked["expected_value"].max() <= 0.05
+
+
+def test_the_scan_reports_each_side_s_sample_size(scan_db, as_of, archived):
+    """The number the rule is applied to has to be visible, not implicit."""
+    predict_mod.clear_model_cache()
+    frame, _ = scan_fixtures.scan(
+        scan_db, as_of, ["E0"], backtest.DEFAULT_PRICE_SOURCE
+    )
+    assert {"n_home", "n_away"} <= set(frame.columns)
+    assert (frame["n_home"] >= 0).all()
+    assert (frame["n_away"] >= 0).all()
+
+
+def test_an_unknown_team_counts_as_zero_matches(scan_db, as_of):
+    """Not as missing. A club the model has never seen is the extreme case of
+    the thing the floor exists to catch, and must not slip through as NaN."""
+    predict_mod.clear_model_cache()
+    bundle = predict_mod.build_models(scan_db, "E0", as_of, fit_counts=False)
+
+    class Unknown:
+        home_team = "Newly Promoted FC"
+        away_team = database.known_teams(scan_db, league="E0")[0]
+
+    n_home, n_away = scan_fixtures._sample_sizes(bundle, Unknown)
+    assert n_home == 0
+    assert n_away > 0
+    assert scan_fixtures._withhold(n_home, n_away, 0.01)
