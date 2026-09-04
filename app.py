@@ -30,6 +30,8 @@ from fbedge import predict as predict_mod
 from fbedge import profile as profile_mod
 from fbedge.models import base as model_base
 
+import home_view
+
 st.set_page_config(page_title="football-edge", page_icon="*", layout="wide")
 
 SUMMARY_METRICS = [
@@ -88,6 +90,20 @@ def load_teams(db_path: str, league: str, season_start_year: int) -> list[str]:
     if not teams:  # early in a season a team may not have played yet
         teams = database.known_teams(con, league=league)
     return teams
+
+
+def _index_of(options: list, wanted) -> int:
+    """Position of `wanted` in `options`, or 0 when it is absent.
+
+    Used to open the detail page on the fixture that was clicked. Falling back
+    to 0 rather than raising matters: the calendar covers the current season
+    while the selectors cover every season on record, so a team can legitimately
+    be missing from the list the sidebar happens to be showing.
+    """
+    try:
+        return options.index(wanted)
+    except (ValueError, AttributeError):
+        return 0
 
 
 def stat_cell(stat: profile_mod.Stat, as_percent: bool) -> str:
@@ -425,10 +441,24 @@ if options.empty:
     st.error("The database exists but has no matches in it. Re-run the build script.")
     st.stop()
 
+# The calendar is the landing page; everything below is the detail view a click
+# on one of its fixtures opens. Rendering it here rather than in a Streamlit
+# multipage app keeps one sidebar and one database connection.
+if st.session_state.get("view", "home") == "home":
+    home_view.render(db_path, model_base.DEFAULT_HALF_LIFE_DAYS)
+    st.stop()
+
+opened = st.session_state.get("match", {})
+if st.sidebar.button("< Back to calendar", width="stretch"):
+    st.session_state["view"] = "home"
+    st.rerun()
+
 league_names = options.drop_duplicates("league").set_index("league")["league_name"]
+_league_codes = league_names.index.tolist()
 league = st.sidebar.selectbox(
-    "League", options=league_names.index.tolist(),
+    "League", options=_league_codes,
     format_func=lambda code: league_names[code],
+    index=_index_of(_league_codes, opened.get("league")),
 )
 
 seasons = (
@@ -446,12 +476,18 @@ if len(teams) < 2:
     st.warning(f"Only {len(teams)} team(s) on record for this league and season.")
     st.stop()
 
-home_team = st.sidebar.selectbox("Home team", teams, index=0)
+home_team = st.sidebar.selectbox(
+    "Home team", teams, index=_index_of(teams, opened.get("home_team"))
+)
 away_options = [t for t in teams if t != home_team]
-away_team = st.sidebar.selectbox("Away team", away_options, index=0)
+away_team = st.sidebar.selectbox(
+    "Away team", away_options, index=_index_of(away_options, opened.get("away_team"))
+)
 
+_kickoff = opened.get("kickoff_local")
+_default_cutoff = _kickoff.date() if _kickoff is not None else dt.date.today()
 as_of = st.sidebar.date_input(
-    "Knowledge cut-off", value=dt.date.today(),
+    "Knowledge cut-off", value=_default_cutoff,
     help="Only matches played strictly before this date are used. Move it back "
          "to see what the picture looked like at any point in the past.",
 )

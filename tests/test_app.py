@@ -37,9 +37,23 @@ pytestmark = pytest.mark.skipif(
 
 
 def _app():
+    """The app as a visitor first sees it: the calendar home page."""
     from streamlit.testing.v1 import AppTest
 
     return AppTest.from_file(str(APP), default_timeout=600)
+
+
+def _match_app():
+    """The app already opened on a fixture.
+
+    The home page is the landing view now, so every test that wants the model
+    controls has to say so. Seeding `view` rather than clicking a Details
+    button keeps these tests independent of which fixtures happen to be on
+    today - a test that only works on a matchday is worse than no test.
+    """
+    at = _app()
+    at.session_state["view"] = "match"
+    return at
 
 
 def test_the_app_runs_at_all():
@@ -49,7 +63,7 @@ def test_the_app_runs_at_all():
 
 
 def test_the_rate_teams_on_selector_offers_every_target():
-    at = _app()
+    at = _match_app()
     at.run()
     radios = [r for r in at.sidebar.radio if r.label == "Rate teams on"]
     assert radios, "the target selector is missing from the sidebar"
@@ -72,7 +86,7 @@ def test_shrinkage_default_follows_the_target():
         # switching back and forth inside one session changes which widgets
         # exist and confuses Streamlit's state bookkeeping. That is a quirk of
         # the test harness rather than of the app.
-        at = _app()
+        at = _match_app()
         at.run()
         radio = [r for r in at.sidebar.radio if r.label == "Rate teams on"][0]
         radio.set_value(choice).run()
@@ -98,8 +112,67 @@ def test_each_xg_target_renders(choice):
     if not database.has_xg(database.connect(config.DB_PATH, read_only=True)):
         pytest.skip("no match_xg table; run scripts/build_xg.py")
 
-    at = _app()
+    at = _match_app()
     at.run()
     radio = [r for r in at.sidebar.radio if r.label == "Rate teams on"][0]
     radio.set_value(choice).run()
     assert not at.exception
+
+
+# ----------------------------------------------------------------------
+# The calendar home page
+# ----------------------------------------------------------------------
+
+
+def test_the_home_page_is_the_landing_view():
+    """A visitor lands on the calendar, not on a fixture form.
+
+    Pins the routing decision itself. Everything else about the home page can
+    change; that it is what opens should not, silently.
+    """
+    at = _app()
+    at.run()
+    assert not at.exception
+    # AppTest's session_state proxy has no .get, so ask before reading.
+    assert "view" not in at.session_state or at.session_state["view"] == "home"
+
+
+def test_the_home_page_offers_a_way_into_a_fixture():
+    """There is a route from the calendar to the detail view.
+
+    Skips rather than fails on a day with no football: international breaks
+    are real and a test that only passes on a matchday would be flaky by
+    design.
+    """
+    from fbedge import fixtures as fixtures_mod
+
+    con = database.connect(config.DB_PATH, read_only=True)
+    try:
+        calendar = fixtures_mod.load_calendar(con, season=fixtures_mod.current_season())
+    except Exception:
+        pytest.skip("no fixtures table; run scripts/build_fixtures.py")
+    if calendar.empty:
+        pytest.skip("fixtures table is empty")
+
+    import datetime as dt
+
+    day = fixtures_mod.nearest_date_with_matches(calendar, dt.date.today())
+    at = _app()
+    at.session_state["calendar_date"] = day
+    at.run()
+    assert not at.exception
+    assert any(b.label == "Details" for b in at.button), (
+        "the calendar showed fixtures but no way to open one"
+    )
+
+
+def test_clicking_into_a_fixture_and_back_out_again():
+    """The round trip, which is the one interaction that spans both views."""
+    at = _match_app()
+    at.run()
+    assert not at.exception
+    back = [b for b in at.sidebar.button if "Back to calendar" in b.label]
+    assert back, "the detail view has no way back to the calendar"
+    back[0].click().run()
+    assert not at.exception
+    assert at.session_state["view"] == "home"

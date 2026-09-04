@@ -123,6 +123,8 @@ fbedge/
   database.py    DuckDB schema, idempotent loading, the team_matches view
   quality.py     coverage report and integrity assertions
   profile.py     the descriptive fixture card
+  fixtures.py    the season calendar, played and unplayed
+  injuries.py    the external injury feed (needs an API key)
   models/
     base.py      time decay, ridge priors, point-in-time training sets
     goals.py     Dixon-Coles: attack, defence, home advantage, low-score fix

@@ -122,6 +122,12 @@ Confirmed line-ups arrive about an hour before kick-off, which is after the
 price the bet is struck at, so even a perfect version of this feature cannot
 use them. `fbedge/availability.py` is built around that constraint.
 
+**A source now exists for the first of those.** `fbedge/injuries.py` reads
+API-Football, which states a reason per player per fixture ("Ankle Injury"),
+and a **free** key covers 2022 to 2024 - the same era the availability study
+used. That makes the null retestable with real injuries instead of a rotation-
+contaminated proxy, at no cost. It is the cheapest open question in this file.
+
 ## B7. The count models cannot be validated against any market
 
 **Severity: structural — no code fix exists.**

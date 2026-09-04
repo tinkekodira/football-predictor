@@ -29,7 +29,7 @@ error, so they are worth knowing about before trusting a result:
 
 ## Current status
 
-- 317 tests passing (`python -m pytest`).
+- 372 tests passing (`python -m pytest`).
 - **The CLV measurement was broken, and is now fixed and re-baselined.** A
   benchmark change in 2024 plus favourite-longshot bias in multiplicative
   margin removal inflated every historical CLV figure. `margin_method` now
@@ -409,7 +409,142 @@ beatable.
 
 ---
 
-## What was added in the hierarchical session (most recent)
+## What was added in the home-page session (most recent)
+
+A calendar home page, in the shape of a live-scores site: scroll a date, see
+every fixture in the top five leagues on it, click one for the detail page that
+already existed.
+
+- `fbedge/fixtures.py` - the season calendar, played and unplayed, from
+  Understat. UTC in, local dates out.
+- `scripts/build_fixtures.py` - populates the new `fixtures` table.
+- `home_view.py` - the page itself, at the repo root rather than under
+  `fbedge/` so that nothing importable by a model or a test pulls in Streamlit.
+- `app.py` - now a two-view router. The calendar is what opens; the fixture
+  page is what a click on it opens, seeded from the fixture that was clicked.
+- `tests/test_fixtures.py` (21) and three more in `tests/test_app.py`.
+  **341 tests**, from 317.
+
+### The source question, which was the whole difficulty
+
+**football-data.co.uk cannot supply a calendar.** It is the project's primary
+source and it does publish `fixtures.csv` - `ingest.download_upcoming_fixtures`
+already fetched it - but that file is a *price* feed. On the day this was
+built it held 48 rows spanning three days, **two of them** in the top five
+leagues. It can never answer "what is on in October".
+
+**Understat can, and was already integrated.** Its league payload carries the
+whole season in `dates`, played and unplayed alike: 1,752 fixtures across the
+five leagues for 2026/27, running to 30 May 2027. No new source, no new
+dependency, and the team-name aliases were already derived and tested.
+
+Three things that would be wrong if reversed:
+
+- **`understat.match_frame` drops unplayed fixtures and must keep doing so.**
+  An unplayed match carries a scoreline of null and an xG of **zero**, not a
+  missing one. `fixtures.fixture_frame` is its mirror image and writes NULL for
+  both. `test_unplayed_fixtures_carry_null_not_zero` is the guard; without it,
+  twenty teams of "failed to have a shot" would flow into the ratings.
+- **Kick-offs are stored in UTC and converted on the way out.** Understat gives
+  19:00 for a match that starts at 21:00 in Zagreb. Storing local time would
+  bake one reader's timezone into the database; grouping on the *UTC* date
+  would scatter one matchday across two and look like missing fixtures.
+- **The calendar is re-fetched, not merged.** A result arrives by *changing* a
+  row from unplayed to played, so an insert-only load would keep the stale row
+  and show a finished match as still to come, next to itself. The delete is
+  scoped to the seasons and leagues actually supplied.
+
+### What the right-hand panels can and cannot honestly claim
+
+The brief asked for injury news. **There is no news source in this project, and
+none was invented.**
+
+- **Highlighted matches** is real: the model prices every fixture on the day
+  from ratings fitted only on earlier matches, and shows where it has a strong
+  but non-obvious opinion. It is labelled as opinion, not edge - odds exist
+  only a few days ahead, and this model has never beaten a closing line.
+- **Availability watch** is derived, not reported. It reuses
+  `availability.for_fixture`, the same point-in-time windowing the null result
+  was measured with, rather than a second version written for display. It says
+  plainly that it cannot tell an injury from a rested player and cannot know
+  about this morning.
+- **News** says it has no source. Filling it with something that looked like
+  news would have been the worst available outcome.
+
+### Real injury news, added after the first pass
+
+The first version of this page had no injury panel worth the name, because no
+source existed. One does now: `fbedge/injuries.py`, and it is **the only keyed
+external dependency in the project**.
+
+- **Provider: API-Football** (`v3.football.api-sports.io/injuries`). Chosen
+  because it is addressed by *league and season*, so five requests refresh all
+  five leagues against a free allowance of a hundred a day. The alternative
+  looked at, Big Balls Sports Data, offers a larger quota but is addressed per
+  player id, which would mean building a player-id mapping first.
+- `FOOTBALL_API_KEY` in the environment, never in a tracked file - this repo
+  still has no `.gitignore` (BACKLOG B3).
+- `scripts/build_injuries.py` loads it; `--probe` prints one league's raw
+  response and writes nothing.
+
+**The schema is now confirmed against a live response**, and
+`test_the_parser_agrees_with_a_real_response` pins that entry verbatim - the
+only test in the file that could catch the provider changing rather than merely
+proving the parser self-consistent.
+
+**But the free plan stops at the 2024 season, and that is the headline.**
+Probing 2024 returns 3,168 Premier League rows; the current season returns
+none. Both look identical - an empty list - which is why
+`config.INJURY_FREE_PLAN_LAST_SEASON` exists and why the script now says which
+case it is. So a free key **cannot show today's team news**. It can do
+something else valuable, below.
+
+**Two real defects the live probe exposed, both now fixed:**
+
+1. **No date filter.** A league-season is thousands of rows because the feed
+   sends one per player *per fixture*. The panel would have listed a club's
+   entire season of absences at once and read as a permanent injury crisis.
+   `for_teams` now takes `on_date` and the page passes the day it is showing.
+2. **`paging` was ignored.** It is `{"current": 1, "total": 1}` today, so
+   everything fits on one page - but had that changed, the reader would have
+   silently taken a fraction of a league. It now refuses rather than
+   half-reads.
+
+Neither was findable without a real response, which is the argument for
+`--probe` over trusting a published schema.
+
+### What a free key is actually good for
+
+**Retesting the availability null with real injuries.** 2022 to 2024 is exactly
+the era the availability study covered, and the study's stated weakness was
+that Understat line-ups cannot separate an injury from a rested player
+(BACKLOG B6). This feed states the reason - "Ankle Injury" - per player per
+fixture. That turns a proxy into a measurement, and it is free.
+
+That is a genuine open question this now makes answerable, and it is worth more
+than the panel: the panel is decoration on a model with no edge, whereas the
+availability question is about whether a real signal was missed.
+
+**Nothing guesses a club name.** Matching is exact, then exact after a
+documented normalisation, then an explicit alias; anything left is printed and
+the row dropped. `test_the_alias_table_is_injective` earned its place
+immediately by catching twelve alias keys - `'fc barcelona'`, `'ac milan'`,
+`'as roma'` and others - that normalise to something else and could therefore
+never have been hit.
+
+### Still needed for the page to be fully populated
+
+1. **A paid API-Football plan** if the injury panel is to show current team
+   news at all; a free key stops at 2024. The code needs no change either way -
+   only the plan does.
+2. `python scripts/build_rosters.py --league E0` with the app stopped -
+   `match_lineups` holds **83 rows**, so the availability panel currently has
+   nothing to derive from. The earlier session's backfill cached 3,430 matches
+   but the write never landed.
+3. Odds for upcoming fixtures stop at the football-data horizon of about three
+   days, so most future dates carry no market comparison at all.
+
+## What was added in the hierarchical session
 
 An attempt to stop *choosing* the shrinkage and start fitting it. **Built,
 measured, and rejected** - and the way it fails is more useful than the feature
