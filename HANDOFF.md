@@ -27,6 +27,36 @@ error, so they are worth knowing about before trusting a result:
 
 ---
 
+## Phase 4 was built, and the gate it was blocked on is still shut
+
+**Read this before the status list.** The standing rules below say "Do not
+build Phase 4 unless the gate opens". The gate has not opened - CLV is still
+-1.500% (-9.1 SE) on E0 - and Phase 4 was built anyway, on 2026-09-04, at the
+explicit instruction of a brief that superseded that rule.
+
+That is a decision, not an oversight, and it was made with the disagreement on
+the table. What the build does about it:
+
+- Every EV figure the scan prints carries the backtested CLV and calibration
+  for **that market on that league**, with the sample size, from
+  `fbedge/evidence.py`. There is no code path that produces a bare number.
+- A market with no historical price says so explicitly rather than showing a
+  blank. Corners, cards, BTTS, double chance, the team totals and the half-time
+  markets are all in that category: measurable for calibration, never
+  backtestable as bets.
+- The scan's footer states that this model has never beaten the closing line
+  and that a positive EV means the model disagrees with the price, not that the
+  model is right.
+- Fixtures involving a club the model barely knows are flagged inline. This was
+  not theoretical: the first live run put two newly promoted clubs in the top
+  four rows at +68% and +50% EV, on two matches of history each.
+
+**The gate rule stands.** Nothing about building the scan is evidence for
+staking money, and the sequence in the standing rules - paper-trade for several
+weeks, judge on the CLV from *that* period - is unchanged.
+
+---
+
 ## Current status
 
 - 402 tests passing (`python -m pytest`).
@@ -1274,9 +1304,20 @@ Either result is useful. Neither reopens the gate on its own.
    the season breakdown has settled which window is the right one.
 3. **Better inputs, not a better model.** Zero team-news signal — no injuries,
    no rotation, no resting starters. That is a structural disadvantage no
-   hyperparameter fixes. Phase 5 in the previous handoff covers xG from
-   Understat, FBref for UEFA competitions, and schedule congestion (`rest_days`
-   and `matches_last_14_days` are computed but never fed into the fit).
+   hyperparameter fixes. Phase 5 covers xG from Understat (mostly delivered;
+   the blend is the shipping default) and schedule congestion (`rest_days` and
+   `matches_last_14_days` are computed but never fed into the fit).
+
+   **FBref for UEFA is off the list.** Stats Perform terminated FBref's data
+   agreement on 20 January 2026 and required removal of every advanced
+   statistic; Sports Reference announced it on 23 January. Results remain on
+   the site but `fbref.com` now answers HTTP 403 to a scripted request
+   (verified 2026-09-04, browser user-agent, two network paths), so it is not a
+   source here at all. UEFA is rescoped to results only, and the honest note is
+   that there is no free UEFA xG at any quality — Understat covers the big five
+   plus the RFPL from 2014/15 and nothing European — so a European fixture
+   could only be fitted on goals, which is a different model from the one every
+   number in this document describes. See BACKLOG B13.
 4. Consider that the honest conclusion may be: this is a well-built,
    well-tested learning project, and that is a fine place for it to stay.
 
@@ -1284,9 +1325,14 @@ Either result is useful. Neither reopens the gate on its own.
 
 ## Standing rules
 
-- **Do not build Phase 4** unless the gate opens, and the gate needs CLV
-  indistinguishable from zero *and* holding up on a tuner holdout window it
-  never influenced.
+- **Phase 4 is built (2026-09-04) and the gate is still shut.** The rule was
+  "do not build Phase 4 unless the gate opens", and it was overridden by an
+  explicit instruction rather than by evidence. CLV is unchanged at -1.500%
+  (-9.1 SE). See the section at the top of this document for what the build
+  does to keep that visible on every screen it produces. **Building a scanner
+  is not the same as having something to act on**, and nothing here has
+  reopened the gate: it still needs CLV indistinguishable from zero *and*
+  holding up on a tuner holdout window it never influenced.
 - **Do not stake real money.** Even if the gate opens, the sequence is:
   paper-trade for several weeks recording what would have been bet, and judge
   it on the CLV from *that* period, not the historical backtest number.

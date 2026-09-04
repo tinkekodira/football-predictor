@@ -356,13 +356,60 @@ have completely turned over. The models do not use it.
 | 1 | Data spine, quality checks, fixture profiles, web app | **done** |
 | 2 | Dixon-Coles goals model, negative-binomial corners and cards | **done** |
 | 3 | Walk-forward backtest, calibration, closing line value, tuning | **done** |
-| 4 | Upcoming fixtures, live EV scanner against book prices | next |
-| 5 | xG from Understat, UEFA via FBref, fatigue, lineups | |
+| 4 | Fixture archive, pre-match EV scan, forward calendar, market coverage | **done** |
+| 5a | xG from Understat | **mostly done** |
+| 5b | UEFA competitions, **results only** — see below | blocked on a source |
+| 5c | Fatigue and congestion, line-ups | |
 
-Phase 4 points the same machinery at fixtures that have not been played yet:
-pulling the upcoming list and current prices, running the model against them,
-and surfacing anything it thinks is mispriced. The engine for that already
-exists — a live scan is a backtest with the results column missing.
+Phase 4 points the same machinery at fixtures that have not been played yet.
+The engine already existed — a pre-match scan is a backtest with the results
+column missing — so the work was the parts around it: an append-only archive of
+the source's twice-weekly price file, which is overwritten weekly and cannot be
+reconstructed afterwards; a whole-season calendar; and the evidence labelling
+that stops a price ever reaching a reader without its track record.
+
+**It is a pre-match scan, not a live scanner**, which is what the roadmap used
+to call it. Prices in this source are collected on Friday afternoons no later
+than 17:00 British time for weekend fixtures and Tuesdays no later than 13:00
+for midweek ones. Nothing here watches a market move.
+
+### Phase 5 was reordered, and half of it was rescoped
+
+**Understat xG comes first**, because it is nearly delivered and is the
+higher-value half: `understat.py` and `build_xg.py` exist, `compare_targets.py`
+scores goals against xG against a blend on identical matches, and the blend is
+already the shipping default.
+
+**The FBref half is gone.** On 20 January 2026 Stats Perform (Opta) terminated
+FBref's data agreement and required the removal of all advanced statistics;
+Sports Reference announced it on 23 January and did not contest it, citing
+legal costs. Results, schedules, squads and basic match statistics remain on
+the site. xG and every Opta-derived advanced metric do not, and are not coming
+back.
+
+Two things follow, and the second was found while checking the first:
+
+1. **UEFA work is rescoped to results only.** There is no free xG for European
+   competition at any quality. Understat covers the big five domestic leagues
+   plus the RFPL from 2014/15 and has no UEFA coverage at all, so a European
+   fixture cannot be priced on the same footing as a domestic one however the
+   results arrive.
+2. **FBref is no longer usable as a source here even for results.** Verified
+   2026-09-04: `fbref.com` returns HTTP 403 to a scripted request, with a
+   browser user-agent and through two separate network paths. The results-only
+   rescope therefore needs a different source, and the free tier of
+   football-data.org — already wired up in `fbedge/calendar.py` — includes the
+   Champions League. openfootball has a Champions League file for 2024/25 but
+   not for 2025/26 or 2026/27, so it is not the one to rely on.
+
+**The backtest is guarded for this already.** UEFA matches would enter the
+database with results and no odds, and a bet cannot be settled against a price
+that does not exist. Matches with no odds are fitted and priced — they inform
+team strengths and count towards calibration — and can never become bets,
+because a record with no price has no expected value and `BacktestResult.bets`
+requires one. Every run prints how many matches were fitted but not bettable.
+This is the same limitation already documented for corners and cards, and it is
+the same mechanism: no price, no bet, no closing line value.
 
 ---
 

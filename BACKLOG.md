@@ -299,6 +299,45 @@ change B1 and B10 are both about. If it is ever done, it should be done as a
 *comparison* — `scripts/compare_targets.py` already scores two targets on
 identical matches — and not as a substitution.
 
+## B13. FBref is gone as a source, and not only for xG
+
+**Severity: structural — it removes a roadmap item, and no code fixes it.**
+
+The roadmap said Phase 5 would add "xG from Understat, UEFA via FBref". The
+second half no longer exists.
+
+On 20 January 2026 Stats Perform (Opta) terminated FBref's data agreement and
+required immediate removal of every advanced statistic. Sports Reference
+announced it on 23 January and chose not to contest the claimed breach, citing
+the cost of litigation. Results, schedules, squads and basic match statistics
+remain. xG and every Opta-derived metric are gone indefinitely.
+
+**Checked on 2026-09-04 rather than assumed, and the check found something
+worse.** `fbref.com/en/comps/9/Premier-League-Stats` and `fbref.com/en/` both
+return **HTTP 403** to a scripted request — with a realistic browser
+user-agent, and through two separate network paths. So FBref is unusable here
+even for the results-only rescope, not merely stripped of the advanced data.
+
+**What to use instead**, if UEFA is ever wanted: football-data.org's free tier
+includes the Champions League and `fbedge/calendar.py` already speaks to it.
+openfootball has a Champions League file for 2024/25 and **not** for 2025/26 or
+2026/27, which is a concrete instance of the "occasional gaps mid-season" that
+module's docstring warns about — do not build on it for this.
+
+**The consequence for the model is not the source, it is the xG.** Understat
+covers the big five domestic leagues plus the RFPL from 2014/15 and has no UEFA
+coverage. The shipping model fits team strengths to a goals/xG blend, so a
+European fixture could only ever be fitted on goals — a different and worse
+model than the one every domestic number in `HANDOFF.md` describes. Mixing the
+two in one fit would be the same class of silent instrument change as B1 and
+B10.
+
+**Backtest side: already guarded.** A UEFA match arrives with a result and no
+odds. `BacktestConfig.calibration_markets` and `BacktestResult.fitted_not_bettable`
+make that explicit: odds-less matches are fitted and priced, contribute to
+calibration and to team strengths, and can never be settled as bets, because a
+record with no price has no expected value. Every run prints the count.
+
 ---
 
 ## Not bugs — open questions, kept here so they stay visible
