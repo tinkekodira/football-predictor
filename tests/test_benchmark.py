@@ -136,6 +136,64 @@ def test_a_minority_book_does_not_count_as_a_change():
     ) == []
 
 
+def test_a_match_nobody_priced_does_not_break_the_benchmark_table():
+    """**Rows without a benchmark are the ordinary case, not an edge case.**
+
+    A match nobody priced reaches here with a null `fair_line_source`, and the
+    project's own design keeps those rows: they are fitted, they inform team
+    strengths, they count towards calibration, and they can never be settled as
+    bets. `BacktestResult.fitted_not_bettable` exists precisely to count them.
+
+    The function used to label seasons *after* filtering those rows out, then
+    realign by the survivors' original labels - which asks for positions that
+    no longer exist. It raised `KeyError` whenever the dropped rows were not a
+    trailing block, which is to say almost always. That made the one diagnostic
+    the project tells you to run before trusting a CLV trend unrunnable on the
+    frames it is meant for.
+    """
+    rows = [
+        ("2021-09-01", None), ("2021-09-02", None), ("2021-09-03", None),
+        ("2024-09-01", "pinnacle"), ("2024-09-02", "pinnacle"),
+        ("2024-09-03", "pinnacle"),
+    ]
+    table = evaluation.fair_line_sources(_predictions(rows))
+    assert len(table) == 1
+    assert table["season"].iloc[0] == 2024
+    assert table["selections"].iloc[0] == 3
+
+
+def test_a_season_is_read_from_its_own_date_not_its_position():
+    """Interleaved gaps must not shift a row into a neighbouring season.
+
+    The failure this guards is silent rather than loud: a row keeping its
+    position but taking another row's season would move selections between
+    seasons in the table, which is exactly the signal `benchmark_changed` reads.
+    """
+    rows = [
+        ("2021-09-01", "pinnacle"), ("2021-09-02", None),
+        ("2021-09-03", "pinnacle"), ("2024-09-01", None),
+        ("2024-09-02", "betfair_exchange"), ("2024-09-03", None),
+    ]
+    table = evaluation.fair_line_sources(_predictions(rows)).set_index("season")
+    assert table.loc[2021, "fair_line_source"] == "pinnacle"
+    assert table.loc[2021, "selections"] == 2
+    assert table.loc[2024, "fair_line_source"] == "betfair_exchange"
+    assert table.loc[2024, "selections"] == 1
+
+
+def test_an_explicit_season_column_survives_the_same_gaps():
+    """`season_breakdown` passes seasons in rather than deriving them."""
+    rows = [
+        ("2021-09-01", None), ("2021-09-02", None),
+        ("2024-09-01", "pinnacle"), ("2024-09-02", "pinnacle"),
+    ]
+    table = evaluation.fair_line_sources(
+        _predictions(rows), season=pd.Series([2021, 2021, 2024, 2024])
+    )
+    assert len(table) == 1
+    assert table["season"].iloc[0] == 2024
+
+
 def test_sources_are_empty_without_the_column():
     frame = pd.DataFrame({"date": ["2022-10-01"], "match_id": ["m1"]})
     assert evaluation.fair_line_sources(frame).empty

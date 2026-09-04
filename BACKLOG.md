@@ -537,13 +537,51 @@ tier that season and the row may be feed noise rather than a missing alias.
 is what that module's docstring asks for and why this is a backlog entry rather
 than a patch. `test_the_alias_table_is_injective` guards the table itself.
 
+## B20. The benchmark diagnostic crashed on the frames it was written for — FIXED
+
+**Severity: medium — the one check the project tells you to run first.**
+
+`evaluation.fair_line_sources` is what `season_breakdown.py` calls to say which
+bookmaker supplied the closing benchmark each season, and `backtest.py:69`
+points at it as the thing to check before trusting a CLV trend. B1 and B10 are
+both instances of that trend being an artifact, so it is not a minor report.
+
+It labelled seasons *after* filtering out rows with no benchmark, then realigned
+by the survivors' original labels. `season_labels` returns a fresh `0..n-1`
+index, so those labels point at positions that no longer exist:
+
+```python
+frame = predictions.copy().reset_index(drop=True)
+frame = frame[frame["fair_line_source"].notna()]     # index now 3,4,5
+frame["season"] = season_labels(frame["date"]).loc[frame.index]   # index 0,1,2
+# KeyError: None of [RangeIndex(start=3, stop=6)] are in the [index]
+```
+
+**Rows with no benchmark are the ordinary case, not an edge case.** A match
+nobody priced arrives with a null source, and this project deliberately keeps
+those rows — `BacktestResult.fitted_not_bettable` counts them. So the failure
+fires whenever the unpriced rows are not a trailing block, which is almost
+always. It went unnoticed because the runs that exercised it happened to have a
+benchmark on every row.
+
+**FIXED 2026-09-04.** Labelled before filtering, so a row's season comes from
+its own date and never from its position. Three tests cover the leading-gap
+case that raised, the interleaved case that could have shifted a selection into
+a neighbouring season, and the explicit `season=` path `season_breakdown` uses.
+
 ---
 
 ## Not bugs — open questions, kept here so they stay visible
 
-- **Why 2023.** CLV falls from about 0% to about -2% and stays there for three
-  seasons (-3.1, -3.7, -4.9 SE). It survives the margin fix and 2023 carries no
-  Betfair data, so it is not the benchmark artifact. Unexplained.
+- **Why 2023 - PARTLY ANSWERED, and the question has changed.** See the
+  investigation section in `HANDOFF.md`. Five hypotheses were written down
+  first and all five were answered. The step at 2023 is real and is *not* the
+  benchmark, the margin, or bookmaker coverage. It is not one phenomenon
+  either: 2023 carries a genuine model-quality signature and 2024-25 do not.
+  What remains open is a sharper question - **why did the model's
+  disagreements stop being informative while its average calibration held
+  up?** In 2024 the model was closer to the market in log loss than in 2021 or
+  2022, and its selected bets still lost 1.5% to the close.
 - **The other four leagues for availability.** 16,000 matches instead of 3,000
   takes the detectable effect from ~2.5% to ~1.2%, where the point estimates
   sit. No new code, roughly 2.7 hours of requests.

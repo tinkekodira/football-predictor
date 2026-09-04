@@ -65,7 +65,7 @@ weeks, judge on the CLV from *that* period - is unchanged.
 
 ## Current status
 
-- 619 tests passing, 1 skipped (`python -m pytest`).
+- 622 tests passing, 1 skipped (`python -m pytest`).
 - **A paper-trading ledger exists, and it is the first thing here that
   accumulates evidence going forward rather than backward.** The standing rule
   has always been "paper-trade for several weeks and judge it on the CLV from
@@ -813,6 +813,86 @@ DuckDB allows one writer, so the report refused to run whenever the app was
 open - which is exactly when somebody wants it. Reporting takes a read-only
 connection; only settling writes, and being unable to settle now prints what to
 do rather than a DuckDB traceback.
+
+## The "why 2023" investigation, and the question it replaced
+
+Run while the first paper-ledger fixtures were unplayed, because it changes no
+default and touches nothing the ledger reads. **Five hypotheses were written
+down before any number came out**, and all five are reported below including
+the dull ones.
+
+`scripts/season_breakdown.py --league E0 --from 2019-08-01 --market 1x2`, with
+and without `--pin-benchmark pinnacle`:
+
+| season | CLV unpinned | CLV pinned | benchmark effect | model-market log loss gap | beat close |
+|---|---|---|---|---|---|
+| 2019 | +0.07% | +0.23% | +0.16% | -0.0012 | 50.4% |
+| 2020 | +0.95% | +0.93% | -0.02% | 0.0077 | 49.8% |
+| 2021 | -0.14% | -0.18% | -0.04% | 0.0095 | 49.0% |
+| 2022 | +0.73% | **+0.85%** | +0.12% | 0.0107 | 50.7% |
+| 2023 | -1.48% | **-1.52%** | -0.04% | **0.0183** | 42.0% |
+| 2024 | -1.75% | **-1.52%** | +0.23% | **0.0031** | 44.0% |
+| 2025 | -1.89% | **-1.35%** | +0.53% | 0.0049 | 42.7% |
+
+2025 pinned rests on 253 bets rather than ~490, because Pinnacle did not price
+half the season - the cost B1 documents rather than hides.
+
+### The five hypotheses, answered
+
+**H5, margins compressed: dead.** Mean overround across real books at the
+boundary was 1.05175 (2022) to 1.05232 (2023) - flat. Pinnacle's own overround
+went 1.0246 to 1.0293, marginally *wider*. Nothing compressed. (The first pass
+at this counted `market_max` and `market_avg` as bookmakers and reported a
+"sharpest book" at 0.83, which is an arbitrage rather than a price. They are
+derived columns, not books.)
+
+**H3, bookmaker coverage: a real mechanism, the wrong size, and the wrong
+direction.** Interwetten priced all 380 E0 matches in 2021 and 2022, **198 in
+2023, and none from 2024** - it withdrew mid-season, exactly at the boundary.
+Books per selection fell 6.00 to 5.52. But the best price's advantage over the
+median book only fell 0.22 points against a CLV move of 2.3, and 2025 has the
+*most* books of any season (7.98) with among the worst CLV. Coverage moves the
+number a tenth as much as needed, and in 2025 it moves it the wrong way.
+
+**The benchmark switch: real, small, and only after 2023.** 2021, 2022 and 2023
+are 100% Pinnacle; Betfair Exchange takes over in 2024. So it cannot touch
+2023, and pinning recovers only 0.23 points of 2024 and 0.53 of 2025. B1 and
+B10 were right that the ruler moved - it just did not move in the season the
+decline starts.
+
+**H2, the model got worse: true in 2023 and only 2023.** The model-market log
+loss gap spiked to 0.0183, the worst in the series, in the season CLV fell.
+
+**H1, the market got sharper: not in a way that explains 2024-25.**
+
+### The finding, which is a dissociation
+
+**In 2024 the model was closer to the market than in 2021 or 2022 - and its
+selected bets still lost 1.5% to the close.** The gap was 0.0031 against
+0.0107 in 2022, while CLV went from +0.85% to -1.52%. Average probability
+quality and closing line value moved in *opposite* directions.
+
+That is only possible if the damage is in **which bets get selected** rather
+than in the probabilities themselves. Log loss scores every priced selection;
+CLV scores the ~40% that clear a 2% edge, which is where the model most
+disagrees with the price. The model's average calibration recovered after 2023
+and its disagreements did not.
+
+**So the question has changed**, and the new one is sharper than the old one:
+not "why did the model get worse in 2023", but *why did the model's
+disagreements stop being informative while its calibration held up?* The
+`beat_close` column says the same thing in one number - it sits at 49-51%
+through 2022 and at 42-44% for all three seasons after.
+
+That is also the question BACKLOG B17 was circling from the other side, and it
+is the one the paper ledger is now collecting forward evidence on.
+
+### What was not done
+
+No default changed and nothing in the pricing or settlement path was touched,
+because a forward experiment is running. The coverage numbers came from
+read-only queries against `odds`; they are not scripted, and the per-season
+tables reproduce with the two `season_breakdown.py` commands above.
 
 ## What was added in the home-page session
 

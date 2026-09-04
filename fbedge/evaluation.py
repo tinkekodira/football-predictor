@@ -894,15 +894,23 @@ def fair_line_sources(
     if predictions.empty or "fair_line_source" not in predictions.columns:
         return pd.DataFrame()
 
+    # **Label first, filter second.** `season_labels` returns a fresh 0..n-1
+    # index, so labelling a frame that has already been filtered and then
+    # realigning by the survivors' labels asks for positions that no longer
+    # exist - a KeyError whenever the dropped rows are not a trailing block.
+    # Rows without a benchmark are the ordinary case, not an edge case: a match
+    # nobody priced reaches here with a null source. Doing it in this order
+    # means the season of a row is computed from that row's own date and never
+    # from its position.
     frame = predictions.copy().reset_index(drop=True)
+    if season is not None:
+        frame["season"] = pd.Series(season).reset_index(drop=True)
+    else:
+        frame["season"] = season_labels(frame["date"], cutover_month)
+
     frame = frame[frame["fair_line_source"].notna()]
     if frame.empty:
         return pd.DataFrame()
-
-    if season is not None:
-        frame["season"] = pd.Series(season).reset_index(drop=True).loc[frame.index]
-    else:
-        frame["season"] = season_labels(frame["date"], cutover_month).loc[frame.index]
 
     counts = (
         frame.groupby(["season", "fair_line_source"]).size().rename("selections")
