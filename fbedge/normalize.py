@@ -408,6 +408,94 @@ def resolve_team(query: str, known_teams: list[str]) -> str | None:
     return via_alias.pop() if len(via_alias) == 1 else None
 
 
+# Corporate and legal noise that carries no information about which club is
+# meant. Stripped from the *ends* of a name before comparing, so "FC Augsburg"
+# and "Augsburg" are one club while a club actually called "Milan" is not eaten
+# by the "AC" rule applied in the middle. Ordered longest-first so "1. FC" is
+# tried before "FC".
+#
+# Lifted out of `injuries.py`, where it was written for API-Football and then
+# needed verbatim for the openfootball calendar: 72 of 96 club names in that
+# feed differ from this project's only by a suffix like "FC" or "AFC".
+EXTERNAL_NAME_NOISE = (
+    "football club", "fussball club", "association", "calcio", "balompie",
+    "1. fc", "1.fc", "1 fc", "afc", "fsv", "tsg", "vfl", "vfb", "sv", "sc",
+    "fc", "cf", "ac", "as", "ss", "us", "rc", "sd", "ud", "cp", "cd", "aj",
+    "sco", "cfc", "rcd", "ca", "de", "1907", "1909", "1913", "1901", "07",
+    "05", "04", "29", "1899",
+)
+
+
+def external_name_key(name: str) -> str:
+    """A comparable form of a club name from somebody else's database.
+
+    Accents removed, punctuation dropped, corporate prefixes and suffixes
+    stripped, spacing collapsed. The point is only to make two spellings of one
+    club compare equal. **It is never used to decide that two different strings
+    are the same club**, which is what a similarity score would do - and which
+    the Understat integration established would silently merge Milan with
+    Inter.
+    """
+    text = _strip_accents(str(name)).lower()
+    text = "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in text)
+    words = text.split()
+    changed = True
+    while changed and words:
+        changed = False
+        for noise in EXTERNAL_NAME_NOISE:
+            parts = noise.split()
+            if len(words) > len(parts) and words[: len(parts)] == parts:
+                words, changed = words[len(parts):], True
+                break
+            if len(words) > len(parts) and words[-len(parts):] == parts:
+                words, changed = words[: -len(parts)], True
+                break
+    return " ".join(words)
+
+
+def resolve_external_team(
+    name: str, known: set[str] | list[str], aliases: dict[str, str] | None = None
+) -> str | None:
+    """Map another provider's club name onto this project's, or return None.
+
+    Four attempts, in decreasing confidence: the name as given; this module's
+    own alias table; a caller-supplied alias table for that provider's known
+    quirks; and a comparison after stripping corporate noise from both sides.
+
+    **No fuzzy fallback, and None is a real answer.** The caller reports it and
+    drops the row. A calendar with a silently unmapped team is a fixture that
+    never joins to anything, which looks exactly like a fixture that was never
+    scheduled - and this project has paid for that shape of bug before.
+    """
+    known = set(known)
+    if name in known:
+        return name
+
+    direct = canonical_team(name)
+    if direct in known:
+        return direct
+
+    for table in (aliases or {}, {}):
+        mapped = table.get(external_name_key(name))
+        if mapped and mapped in known:
+            return mapped
+
+    key = external_name_key(name)
+    if not key:
+        return None
+    for candidate in known:
+        if external_name_key(candidate) == key:
+            return candidate
+    # This module's own alias table, tried both as written and with the
+    # corporate noise stripped. "Manchester City FC" is not a key in it;
+    # "manchester city" is, and dropping the suffix is what finds it.
+    for lookup in (_alias_key(name), key):
+        via_alias = TEAM_ALIASES.get(lookup)
+        if via_alias in known:
+            return via_alias
+    return None
+
+
 def canonical_referee(name: str) -> str | None:
     """Tidy a referee name. Returns None for blanks so SQL sees NULL.
 

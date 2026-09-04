@@ -130,6 +130,35 @@ FIXTURES_MAX_AGE_HOURS = 72.0
 FIXTURE_RECONCILE_TOLERANCE_DAYS = 1
 
 # --------------------------------------------------------------------------
+# The forward calendar (Phase 4)
+# --------------------------------------------------------------------------
+# `fixtures.csv` gives the next few days. A whole remaining season needs a
+# source that publishes one. Three are wired up in `fbedge/calendar.py`; this
+# picks between them.
+#
+# "auto" uses football-data.org when a token is configured and openfootball
+# when one is not, so a machine with no key does something sensible rather than
+# failing on a setting it never chose. "understat" is what the home page has
+# always used and needs no key either.
+CALENDAR_SOURCE = "auto"
+
+# Never committed, and read from the environment for the same reason the injury
+# key is: a key in a tracked file is a key in the history for ever.
+CALENDAR_TOKEN_ENV = "FOOTBALL_DATA_ORG_TOKEN"
+
+# football-data.org's published free-tier allowance, confirmed on their pricing
+# page: twelve competitions, ten calls a minute, scores and schedules delayed.
+# Enforced client-side in `calendar._respect_rate_limit` rather than left to the
+# server to reject - a 429 is a wasted request, and repeated hammering is how
+# access gets withdrawn without warning.
+CALENDAR_CALLS_PER_MINUTE = 10
+
+# A season calendar changes rarely. Twelve hours keeps a postponement current
+# without spending quota or somebody else's GitHub bandwidth; a finished season
+# is never refetched at all.
+CALENDAR_CACHE_HOURS = 12.0
+
+# --------------------------------------------------------------------------
 # Injury feed
 # --------------------------------------------------------------------------
 # The only genuinely external, keyed dependency in the project. Everything
